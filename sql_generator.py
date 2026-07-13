@@ -30,6 +30,13 @@ STRICT RULES:
 - Only write SELECT statements. Never write INSERT, UPDATE, DELETE, DROP, EXEC, or any
   DDL/DML that modifies data.
 - Always use fully qualified table names: [DatabaseName].[SchemaName].[TableName]
+- TABLE SELECTION: the schema context marks either one PRIMARY TABLE (the best
+  match — plus optional SECONDARY tables) or several CANDIDATE TABLES. If a PRIMARY
+  TABLE is given, query it. If only CANDIDATE TABLES are given, choose the SINGLE
+  table whose name and description best fit the question and query only that one.
+  Do NOT JOIN tables unless the question explicitly requires combining data from
+  more than one. Aggregation on that single table — GROUP BY, COUNT, SUM, AVG,
+  TOP N — is expected wherever the question calls for it.
 - TOP 100: add it ONLY when returning raw rows with no aggregation.
   NEVER add TOP when the query contains COUNT, SUM, AVG, MIN, MAX, or GROUP BY.
   Aggregates produce their own natural result set — TOP would be wrong there.
@@ -62,11 +69,39 @@ STRICT RULES:
   output exactly: INSUFFICIENT_SCHEMA
 """
 
-def _build_sql_prompt(question: str, schema_context: str) -> str:
-    return (
-        f"Schema context from Data Dictionary:\n\n{schema_context}\n\n"
-        f"---\n\nGenerate a T-SQL SELECT query to answer this question:\n{question}"
-    )
+
+# ── Fix A: authoritative schema for the DataDictionary catalog table ──────────
+#
+# "DataDictionary" questions have exactly ONE correct source: [rpt].[DataDictionary].
+# Vector retrieval reliably FAILS to surface it — the catalog's own chunks don't
+# embed near phrases like "data type" or "identity column", so semantically
+# adjacent tables (stg.SqlColumns, mdm.Columns, dm_dq.*) outscore it and the
+# generator queries the wrong table. We pin this hand-authored, verified schema
+# instead of searching. Column names are the real T-SQL columns of the catalog
+# (the SELECT * source of config.INGEST_QUERY); Q1/Q18 already prove them correct.
+_DATADICTIONARY_SCHEMA = """\
+PRIMARY TABLE (this is the authoritative source — use ONLY this table):
+Table: [MetadataRepository].[rpt].[DataDictionary]
+  Description: The Data Dictionary catalog. ONE ROW PER TRACKED COLUMN — each row
+    describes a single column of a tracked table in the MetadataRepository database.
+    To count TABLES use COUNT(DISTINCT ObjectName). To count COLUMNS, count rows.
+    Group by SchemaName for per-schema stats; group by DataType for data-type stats.
+  Columns:
+    - DatabaseName (nvarchar, NOT NULL) — database the tracked column belongs to
+    - SchemaName (nvarchar, NOT NULL) — schema of the tracked table
+    - ObjectName (nvarchar, NOT NULL) — name of the tracked TABLE; COUNT(DISTINCT ObjectName) = number of tables
+    - ObjectTypeDesc (nvarchar, NULL) — type of the tracked object (e.g. USER_TABLE)
+    - ObjectDescription (nvarchar, NULL) — description of the tracked table
+    - ColumnName (nvarchar, NOT NULL) — name of the tracked column
+    - ColumnOrder (int, NOT NULL) — ordinal position of the column in its table
+    - DataType (nvarchar, NOT NULL) — SQL data type of the tracked column
+    - max_length (int, NULL)
+    - precision (int, NULL)
+    - scale (int, NULL)
+    - is_nullable (bit, NOT NULL) — 1 if the tracked column is nullable, else 0
+    - is_identity (bit, NOT NULL) — 1 if the tracked column is an identity column, else 0
+    - ColumnDescription (nvarchar, NULL) — description of the tracked column (NULL if undocumented)
+"""
 
 
 # ── Schema retrieval for SQL context ─────────────────────────────────────────
@@ -81,6 +116,12 @@ def get_schema_context(question: str, last_sql: str | None = None) -> tuple[str,
     This ensures follow-up questions always have the full schema of the right table.
     """
     import re as _re
+    from planner import is_catalog_question
+
+    # Fix A — DataDictionary catalog questions have one authoritative table.
+    # Pin its verified schema and skip vector search, which mis-retrieves here.
+    if is_catalog_question(question):
+        return _DATADICTIONARY_SCHEMA, []
 
     _FOLLOWUP = _re.compile(
         r"\b(those|that|it|same|of those|of them|in that|in those|from those)\b",
@@ -106,7 +147,10 @@ def get_schema_context(question: str, last_sql: str | None = None) -> tuple[str,
             from qdrant_client import QdrantClient
             import config as _config
 
-            qc = QdrantClient(host=_config.QDRANT_HOST, port=_config.QDRANT_PORT)
+            qc = QdrantClient(
+                host=_config.QDRANT_HOST, port=_config.QDRANT_PORT,
+                grpc_port=_config.QDRANT_GRPC_PORT, prefer_grpc=True,
+            )
             must = [FieldCondition(key="object_name", match=MatchValue(value=table))]
             if schema:
                 must.append(FieldCondition(key="schema_name", match=MatchValue(value=schema)))
@@ -143,22 +187,36 @@ def get_schema_context(question: str, last_sql: str | None = None) -> tuple[str,
                     )
                 return "\n".join(lines), []
 
-    # Standard vector search for non-follow-up questions
+    # Standard retrieval (Fix B). Pure cosine rank surfaces semantically-adjacent
+    # but WRONG tables (e.g. stg.SqlColumns for a DataDictionary question) and gives
+    # the generator no authority signal. The one reliable signal is a NAME MATCH: if
+    # the question names a table, that table is almost certainly the source. So:
+    #   - name match  -> elevate that table to PRIMARY with its FULL schema (so the
+    #                    right table is fully specified), others for reference.
+    #   - no match    -> fall back to the original behaviour (all retrieved tables,
+    #                    matched columns, vector order) which the model reasons over
+    #                    well. Crucially we do NOT force a primary or expand wrong
+    #                    tables to full schema here — doing so let the model ration
+    #                    -alise the wrong near-tied table (scan_queue vs ScanControl).
     results, _ = retriever.retrieve(question, top_k=10)
+    if not results:
+        return "", results
 
-    tables: dict[str, dict] = {}
+    grouped: dict[tuple, dict] = {}
+    order: list[tuple] = []
     for hit in results:
         p = hit.payload
-        key = f"{p['schema_name']}.{p['object_name']}"
-        if key not in tables:
-            tables[key] = {
+        key = (p["schema_name"], p["object_name"])
+        if key not in grouped:
+            grouped[key] = {
                 "database":    p["database_name"],
                 "schema":      p["schema_name"],
                 "table":       p["object_name"],
                 "description": p["object_description"],
-                "columns":     [],
+                "matched":     [],
             }
-        tables[key]["columns"].append({
+            order.append(key)
+        grouped[key]["matched"].append({
             "name":        p["column_name"],
             "type":        p["data_type"],
             "nullable":    p["is_nullable"],
@@ -166,23 +224,66 @@ def get_schema_context(question: str, last_sql: str | None = None) -> tuple[str,
             "description": p["column_description"],
         })
 
-    lines = []
-    for tbl in tables.values():
-        lines.append(
-            f"Table: [{tbl['database']}].[{tbl['schema']}].[{tbl['table']}]"
-        )
-        lines.append(f"  Description: {tbl['description']}")
+    # Lexical name match: does the question name this table? Normalise both by
+    # stripping non-alphanumerics so "rule targets" matches "RuleTargets" and
+    # "data quality result" matches "Results" (singular) — while "Rules" does
+    # NOT false-match, since normalised "rules" isn't a substring of the question.
+    q_norm = _re.sub(r"[^a-z0-9]", "", question.lower())
+
+    def _name_match(tbl: str) -> bool:
+        n = _re.sub(r"[^a-z0-9]", "", tbl.lower())
+        if not n:
+            return False
+        return n in q_norm or (n.endswith("s") and n[:-1] in q_norm)
+
+    def _cols_full(meta: dict) -> list[dict]:
+        full = retriever.fetch_all_columns(meta["schema"], meta["table"])
+        if not full:
+            return meta["matched"]
+        return [
+            {
+                "name":        c.get("column_name"),
+                "type":        c.get("data_type"),
+                "nullable":    c.get("is_nullable"),
+                "identity":    c.get("is_identity"),
+                "description": c.get("column_description", ""),
+            }
+            for c in sorted(full, key=lambda c: c.get("column_order", 0))
+        ]
+
+    def _render(meta: dict, cols: list[dict], role: str | None) -> str:
+        lines = []
+        if role:
+            lines.append(role)
+        lines.append(f"Table: [{meta['database']}].[{meta['schema']}].[{meta['table']}]")
+        lines.append(f"  Description: {meta['description']}")
         lines.append("  Columns:")
-        for col in tbl["columns"]:
+        for col in cols:
             nullable = "NULL" if col["nullable"] else "NOT NULL"
             identity = " IDENTITY" if col["identity"] else ""
             lines.append(
                 f"    - {col['name']} ({col['type']}{identity}, {nullable})"
                 f" — {col['description']}"
             )
-        lines.append("")
+        return "\n".join(lines)
 
-    return "\n".join(lines), results
+    name_matched = [k for k in order if _name_match(grouped[k]["table"])]
+
+    if name_matched:
+        primary = name_matched[0]
+        blocks = [_render(
+            grouped[primary], _cols_full(grouped[primary]),
+            "PRIMARY TABLE (best match — query this unless the question requires another):",
+        )]
+        for key in order:
+            if key == primary:
+                continue
+            blocks.append(_render(grouped[key], grouped[key]["matched"], "OTHER TABLE (for reference):"))
+        return "\n\n".join(blocks), results
+
+    # No name match — original behaviour: all retrieved tables, matched columns.
+    blocks = [_render(grouped[key], grouped[key]["matched"], None) for key in order]
+    return "\n\n".join(blocks), results
 
 
 # ── SQL generation ────────────────────────────────────────────────────────────
@@ -214,6 +315,32 @@ def generate_sql(question: str, schema_context: str, last_sql: str | None = None
     sql = resp["message"]["content"].strip()
 
     # Strip markdown fences if the model adds them despite instructions
+    sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\s*```$", "", sql)
+    return sql.strip()
+
+
+def repair_sql(question: str, schema_context: str, bad_sql: str, error: str) -> str:
+    """Fix C — one-shot self-correction. Feeds a failed query and its SQL Server
+    error back to the model for a single corrected attempt. Catches malformed
+    aggregates (ORDER BY COUNT() without GROUP BY), alias-binding errors, and
+    similar syntax faults that survive generation. Returns the corrected SQL."""
+    resp = _ollama.chat(
+        model=config.CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": _SQL_SYSTEM},
+            {"role": "user", "content": (
+                f"Schema context from Data Dictionary:\n\n{schema_context}\n\n---\n\n"
+                f"The following T-SQL query failed to execute. Fix it and output ONLY "
+                f"the corrected SELECT query (no explanation, no markdown).\n\n"
+                f"Question: {question}\n\n"
+                f"Failed query:\n{bad_sql}\n\n"
+                f"SQL Server error:\n{error}"
+            )},
+        ],
+        options={"temperature": 0},
+    )
+    sql = resp["message"]["content"].strip()
     sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.IGNORECASE)
     sql = re.sub(r"\s*```$", "", sql)
     return sql.strip()
@@ -371,6 +498,16 @@ def run_sql_pipeline(
     Returns:
         (natural_language_answer, sql_used, rows, columns)
     """
+    # Scope resolution. Aggregation (SUM/AVG/GROUP BY/"most"/"per") stays on the
+    # direct NL->SQL path below; only a genuine schema-wide question that must
+    # first DISCOVER a table set is composed via the enumerate pipeline. The gate
+    # is deterministic (no LLM), so aggregate phrasing can't misroute here.
+    # See planner.resolve_scope.
+    from planner import resolve_scope, run_enumerate_pipeline
+    scope, schema = resolve_scope(question)
+    if scope == "enumerate":
+        return run_enumerate_pipeline(question, schema)
+
     # 1. Get schema context — for follow-ups, anchors to the previous table
     schema_context, _ = get_schema_context(question, last_sql)
 
@@ -392,14 +529,25 @@ def run_sql_pipeline(
             sql, [], []
         )
 
-    # 4. Execute
+    # 4. Execute — with one self-correction attempt on failure (Fix C).
     try:
         rows, columns = execute_sql(sql)
     except Exception as e:
-        return (
-            f"The query failed to execute: {str(e)}",
-            sql, [], []
-        )
+        repaired = repair_sql(question, schema_context, sql, str(e))
+        ok, why = validate_sql(repaired)
+        if not ok or repaired == sql:
+            return (
+                f"The query failed to execute: {str(e)}",
+                sql, [], []
+            )
+        try:
+            rows, columns = execute_sql(repaired)
+            sql = repaired  # report the query that actually ran
+        except Exception as e2:
+            return (
+                f"The query failed to execute: {str(e2)}",
+                repaired, [], []
+            )
 
     # 5. Generate natural language answer
     results_context = format_results_for_llm(rows, columns, sql)

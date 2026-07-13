@@ -15,7 +15,10 @@ from qdrant_client.models import ScoredPoint, Filter, FieldCondition, MatchValue
 import config
 
 _ollama_client = ollama.Client(host=config.OLLAMA_HOST)
-_qdrant_client = QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT)
+_qdrant_client = QdrantClient(
+    host=config.QDRANT_HOST, port=config.QDRANT_PORT,
+    grpc_port=config.QDRANT_GRPC_PORT, prefer_grpc=True,
+)
 
 
 # ── Regex helpers ─────────────────────────────────────────────────────────────

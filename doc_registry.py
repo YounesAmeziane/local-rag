@@ -28,7 +28,10 @@ import config
 
 REGISTRY_PATH = Path(config.DOCS_FOLDER) / ".registry.json"
 
-_qdrant = QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT)
+_qdrant = QdrantClient(
+    host=config.QDRANT_HOST, port=config.QDRANT_PORT,
+    grpc_port=config.QDRANT_GRPC_PORT, prefer_grpc=True,
+)
 
 
 # ── Registry I/O ─────────────────────────────────────────────────────────────

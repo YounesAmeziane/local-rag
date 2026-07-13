@@ -55,6 +55,7 @@ test_chat.py
 test_sql.py
 test_sql_hard.py
 test_results/
+test_docs.py
 
 # Translations
 *.mo
