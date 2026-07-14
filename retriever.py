@@ -11,8 +11,19 @@
 import re
 import ollama
 from qdrant_client import QdrantClient
-from qdrant_client.models import ScoredPoint, Filter, FieldCondition, MatchValue
+from qdrant_client.models import ScoredPoint, Filter, FieldCondition, MatchValue, MatchAny
 import config
+
+
+# ── Access control (audit #7) ─────────────────────────────────────────────────
+
+def _clearance_condition(clearance) -> FieldCondition:
+    """Deny-by-default clearance gate. Returns a Qdrant condition matching only
+    points whose `clearance` label is in the caller's allowed set. Points with no
+    `clearance` field never match MatchAny, so they are excluded (fail closed).
+    `clearance=None` falls back to config.DEFAULT_CLEARANCE."""
+    allowed = list(clearance) if clearance else list(config.DEFAULT_CLEARANCE)
+    return FieldCondition(key="clearance", match=MatchAny(any=allowed))
 
 _ollama_client = ollama.Client(host=config.OLLAMA_HOST)
 _qdrant_client = QdrantClient(
@@ -59,13 +70,14 @@ def is_list_columns_question(question: str) -> bool:
 
 # ── Full-table fetch (bypasses vector search) ─────────────────────────────────
 
-def fetch_all_columns(schema: str, table: str) -> list[dict]:
+def fetch_all_columns(schema: str, table: str, clearance=None) -> list[dict]:
     """
     Fetches ALL columns for schema.table from Qdrant, sorted by column_order.
     Uses scroll (not search) — payload filter only, no vector similarity.
     """
     table_filter = Filter(
         must=[
+            _clearance_condition(clearance),
             FieldCondition(key="schema_name", match=MatchValue(value=schema)),
             FieldCondition(key="object_name", match=MatchValue(value=table)),
         ]
@@ -183,6 +195,7 @@ def retrieve(
     last_assistant_reply: str | None = None,
     topic_table: str | None = None,
     top_k: int = config.TOP_K,
+    clearance=None,
 ) -> tuple[list[ScoredPoint], str]:
     """
     Rewrites the question, embeds it, searches Qdrant.
@@ -192,28 +205,31 @@ def retrieve(
     rewritten = rewrite_query(question, last_assistant_reply, topic_table)
     query_vector = embed_query(rewritten)
 
-    search_filter = None
+    # Clearance gate is always applied (deny-by-default); topic_table narrows further.
+    clearance_cond = _clearance_condition(clearance)
+    must = [clearance_cond]
     if topic_table and "." in topic_table:
         schema, obj = topic_table.split(".", 1)
-        search_filter = Filter(
-            must=[
-                FieldCondition(key="schema_name", match=MatchValue(value=schema)),
-                FieldCondition(key="object_name", match=MatchValue(value=obj)),
-            ]
-        )
+        must += [
+            FieldCondition(key="schema_name", match=MatchValue(value=schema)),
+            FieldCondition(key="object_name", match=MatchValue(value=obj)),
+        ]
 
     results = _qdrant_client.search(
         collection_name=config.COLLECTION_NAME,
         query_vector=query_vector,
-        query_filter=search_filter,
+        query_filter=Filter(must=must),
         limit=top_k,
         with_payload=True,
     )
 
-    if not results and search_filter:
+    # Fallback when the topic_table narrowing yields nothing — but STILL enforce
+    # clearance (never drop the security filter).
+    if not results and len(must) > 1:
         results = _qdrant_client.search(
             collection_name=config.COLLECTION_NAME,
             query_vector=query_vector,
+            query_filter=Filter(must=[clearance_cond]),
             limit=top_k,
             with_payload=True,
         )
@@ -252,15 +268,17 @@ def format_context_debug(results: list[ScoredPoint]) -> str:
 def retrieve_docs(
     question: str,
     top_k: int = config.DOCS_TOP_K,
+    clearance=None,
 ) -> list[ScoredPoint]:
     """
     Semantic search against the documents collection.
-    No topic_table filter — documents span all files.
+    Deny-by-default clearance gate; no topic_table filter — documents span all files.
     """
     query_vector = embed_query(question)
     results = _qdrant_client.search(
         collection_name=config.DOCS_COLLECTION_NAME,
         query_vector=query_vector,
+        query_filter=Filter(must=[_clearance_condition(clearance)]),
         limit=top_k,
         with_payload=True,
     )

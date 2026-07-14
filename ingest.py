@@ -82,6 +82,7 @@ def build_chunks(df: pd.DataFrame) -> list[dict]:
                 "is_identity":        bool(row["is_identity"]),
                 "object_description": row["ObjectDescription"],
                 "column_description": row["ColumnDescription"],
+                "clearance":          "general",  # schema metadata (audit #7)
             }
         })
     return chunks

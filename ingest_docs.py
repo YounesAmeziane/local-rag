@@ -71,7 +71,15 @@ def ingest_file(
     file_name = p.name
     file_type = p.suffix.lower().lstrip(".")
 
-    console.print(f"  [cyan]Chunking {file_name}...[/cyan]")
+    # Access control (audit #7): auto-classify by filename. Files matching a
+    # restricted pattern (HR data, leave policy, ...) are tagged 'restricted' so
+    # deny-by-default retrieval hides them from callers without that clearance.
+    clearance = (
+        "restricted"
+        if any(pat in file_name.lower() for pat in config.RESTRICTED_DOC_PATTERNS)
+        else "general"
+    )
+    console.print(f"  [cyan]Chunking {file_name}...[/cyan] [dim](clearance={clearance})[/dim]")
     chunks = chunk_file(file_path)
 
     if not chunks:
@@ -100,6 +108,7 @@ def ingest_file(
                     "sheet":        chunk.get("sheet"),
                     "row_start":    chunk.get("row_start"),
                     "row_end":      chunk.get("row_end"),
+                    "clearance":    clearance,
                     "text":         chunk["text"],
                 },
             )

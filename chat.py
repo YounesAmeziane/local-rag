@@ -124,13 +124,21 @@ def ask(
     show_sources: bool = False,
     topic_table: str | None = None,
     last_sql: str | None = None,
+    clearance=None,
 ) -> tuple[str, str | None, str, str | None]:
     """
     Full RAG pipeline for one turn.
     Returns (answer, topic_table, route, last_sql).
     last_sql is updated when route == 'sql' so follow-up questions
     stay anchored to the same table.
+
+    `clearance` is the caller's allowed clearance set (audit #7); None falls back
+    to config.DEFAULT_CLEARANCE. It gates Qdrant retrieval deny-by-default. NOTE:
+    real end-user RBAC (per-user identity -> roles -> SQL Server RLS on the query
+    path) is the documented next step; this call still runs under one app identity.
     """
+    if clearance is None:
+        clearance = config.DEFAULT_CLEARANCE
     last_useful_reply = None
     assistant_turns = [m["content"] for m in reversed(history) if m["role"] == "assistant"]
     for reply in assistant_turns[:3]:
@@ -185,7 +193,7 @@ def ask(
         console.print("[bold green]Assistant[/bold green]")
         console.print("[dim]Generating query...[/dim]")
 
-        answer, sql_used, rows, columns = sql_generator.run_sql_pipeline(question, last_sql)
+        answer, sql_used, rows, columns = sql_generator.run_sql_pipeline(question, last_sql, clearance=clearance)
 
         # Always show the full generated SQL
         if sql_used not in ("INSUFFICIENT_SCHEMA",):
@@ -217,19 +225,19 @@ def ask(
     if route in ("structured", "both"):
         if retriever.is_list_columns_question(question) and topic_table and "." in topic_table:
             schema, obj = topic_table.split(".", 1)
-            payloads = retriever.fetch_all_columns(schema, obj)
+            payloads = retriever.fetch_all_columns(schema, obj, clearance=clearance)
             structured_context = retriever.format_all_columns_context(payloads)
             rewritten_query = f"[full-table fetch] {topic_table}"
             structured_results = []
         else:
             structured_results, rewritten_query = retriever.retrieve(
-                question, last_useful_reply, topic_table
+                question, last_useful_reply, topic_table, clearance=clearance
             )
             structured_context = retriever.format_context(structured_results)
         context_parts.append(structured_context)
 
     if route in ("unstructured", "both"):
-        doc_results = retriever.retrieve_docs(question)
+        doc_results = retriever.retrieve_docs(question, clearance=clearance)
         docs_context = retriever.format_docs_context(doc_results)
         context_parts.append(docs_context)
     else:
@@ -326,7 +334,8 @@ def main():
 
         if user_input.lower() == "/sources":
             if last_question:
-                ask(last_question, [], show_sources=True, topic_table=topic_table, last_sql=last_sql)
+                ask(last_question, [], show_sources=True, topic_table=topic_table,
+                    last_sql=last_sql, clearance=config.APP_CLEARANCE)
             else:
                 console.print("[dim]No previous question to show sources for.[/dim]")
             continue
@@ -337,7 +346,8 @@ def main():
 
         last_question = user_input
         _, topic_table, last_route, last_sql = ask(
-            user_input, history, topic_table=topic_table, last_sql=last_sql
+            user_input, history, topic_table=topic_table, last_sql=last_sql,
+            clearance=config.APP_CLEARANCE,
         )
         console.print(
             f"[dim](turns: {len(history) // 2}  |  "

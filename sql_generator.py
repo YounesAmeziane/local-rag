@@ -106,7 +106,7 @@ Table: [MetadataRepository].[rpt].[DataDictionary]
 
 # ── Schema retrieval for SQL context ─────────────────────────────────────────
 
-def get_schema_context(question: str, last_sql: str | None = None) -> tuple[str, list]:
+def get_schema_context(question: str, last_sql: str | None = None, clearance=None) -> tuple[str, list]:
     """
     Retrieves relevant table/column descriptions from the DataDictionary.
 
@@ -114,6 +114,8 @@ def get_schema_context(question: str, last_sql: str | None = None) -> tuple[str,
     vague pronouns), extracts the table from last_sql and fetches ALL columns
     for that table directly — bypassing vector search entirely.
     This ensures follow-up questions always have the full schema of the right table.
+
+    `clearance` gates the Qdrant retrieval deny-by-default (audit #7).
     """
     import re as _re
     from planner import is_catalog_question
@@ -151,7 +153,10 @@ def get_schema_context(question: str, last_sql: str | None = None) -> tuple[str,
                 host=_config.QDRANT_HOST, port=_config.QDRANT_PORT,
                 grpc_port=_config.QDRANT_GRPC_PORT, prefer_grpc=True,
             )
-            must = [FieldCondition(key="object_name", match=MatchValue(value=table))]
+            must = [
+                retriever._clearance_condition(clearance),  # deny-by-default (audit #7)
+                FieldCondition(key="object_name", match=MatchValue(value=table)),
+            ]
             if schema:
                 must.append(FieldCondition(key="schema_name", match=MatchValue(value=schema)))
 
@@ -198,7 +203,7 @@ def get_schema_context(question: str, last_sql: str | None = None) -> tuple[str,
     #                    well. Crucially we do NOT force a primary or expand wrong
     #                    tables to full schema here — doing so let the model ration
     #                    -alise the wrong near-tied table (scan_queue vs ScanControl).
-    results, _ = retriever.retrieve(question, top_k=10)
+    results, _ = retriever.retrieve(question, top_k=10, clearance=clearance)
     if not results:
         return "", results
 
@@ -237,7 +242,7 @@ def get_schema_context(question: str, last_sql: str | None = None) -> tuple[str,
         return n in q_norm or (n.endswith("s") and n[:-1] in q_norm)
 
     def _cols_full(meta: dict) -> list[dict]:
-        full = retriever.fetch_all_columns(meta["schema"], meta["table"])
+        full = retriever.fetch_all_columns(meta["schema"], meta["table"], clearance=clearance)
         if not full:
             return meta["matched"]
         return [
@@ -347,33 +352,84 @@ def repair_sql(question: str, schema_context: str, bad_sql: str, error: str) -> 
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
+#
+# Allowlist validation (audit #3). The old blocklist let several SELECT-shaped
+# writes/abuses through — SELECT ... INTO (creates a table), stacked SELECT INTO,
+# WAITFOR DELAY (stall), OPENQUERY/OPENROWSET (linked servers) — while wrongly
+# rejecting legitimate WITH...SELECT CTEs. This validator instead requires a
+# SINGLE read-only statement (SELECT or WITH...SELECT) and rejects data-modifying,
+# external-data, and stalling constructs. It is defense-in-depth; the primary
+# control is a read-only DB login (see execute_sql / sql/create_readonly_login.sql).
 
 _FORBIDDEN = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|"
-    r"xp_|sp_|OPENROWSET|BULK|GRANT|REVOKE|DENY)\b",
+    r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|MERGE|"
+    r"GRANT|REVOKE|DENY|BULK|INTO|WAITFOR|OPENQUERY|OPENROWSET|OPENDATASOURCE|"
+    r"xp_|sp_)\b",
     re.IGNORECASE,
 )
 
 def validate_sql(sql: str) -> tuple[bool, str]:
     """
-    Validates that the SQL is a safe SELECT statement.
-    Returns (is_valid, reason).
+    Allowlist validation: the query must be a SINGLE read-only statement — a plain
+    SELECT or a WITH...SELECT CTE — with no data-modifying, external-data, or
+    stalling constructs. Returns (is_valid, reason).
     """
     if sql == "INSUFFICIENT_SCHEMA":
         return False, "insufficient_schema"
 
     stripped = sql.strip()
-    if not stripped.upper().startswith("SELECT"):
-        return False, f"Query does not start with SELECT: {stripped[:60]}"
+    if not stripped:
+        return False, "empty query"
 
-    match = _FORBIDDEN.search(stripped)
+    # Single statement only: allow one optional trailing ';', reject anything
+    # after it (stacked queries like "SELECT 1; SELECT ... INTO backdoor").
+    core = stripped.rstrip().rstrip(";").rstrip()
+    if ";" in core:
+        return False, "multiple statements are not allowed"
+
+    # Must be a read-only SELECT, or a WITH...SELECT CTE.
+    upper = core.upper()
+    if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+        return False, f"query must start with SELECT or WITH: {core[:60]}"
+    if upper.startswith("WITH") and not re.search(r"\bSELECT\b", upper):
+        return False, "WITH clause without a SELECT"
+
+    match = _FORBIDDEN.search(core)
     if match:
-        return False, f"Forbidden keyword detected: {match.group()}"
+        return False, f"forbidden construct: {match.group().upper()}"
 
     return True, "ok"
 
 
 # ── Execution ─────────────────────────────────────────────────────────────────
+
+_warned_trusted = False
+
+def _build_conn_str() -> str:
+    """Connection string for the SQL path. Prefers the dedicated read-only login
+    (audit #3) when configured; otherwise falls back to the service's Windows
+    identity and warns once — the validator is then the only barrier."""
+    base = (
+        f"DRIVER={{{config.DB_DRIVER}}};"
+        f"SERVER={config.DB_SERVER};"
+        f"DATABASE={config.DB_DATABASE};"
+        "ApplicationIntent=ReadOnly;"  # AlwaysOn routing hint, NOT a permission
+    )
+    if config.DB_READONLY_USER and config.DB_READONLY_PASSWORD:
+        return base + f"UID={config.DB_READONLY_USER};PWD={config.DB_READONLY_PASSWORD};"
+
+    global _warned_trusted
+    if not _warned_trusted:
+        import sys
+        print(
+            "sql_generator WARNING: DB_READONLY_USER not set -- executing generated "
+            "SQL under the service's Windows identity, not a read-only login. The "
+            "validator is the only barrier. See sql/create_readonly_login.sql (audit #3).",
+            file=sys.stderr,
+        )
+        _warned_trusted = True
+    return base + "Trusted_Connection=yes;"
+
 
 def execute_sql(sql: str) -> tuple[list[dict], list[str]]:
     """
@@ -381,14 +437,7 @@ def execute_sql(sql: str) -> tuple[list[dict], list[str]]:
     Returns (rows, columns) where rows is a list of dicts.
     Caps at 100 rows and enforces a 30-second timeout.
     """
-    conn_str = (
-        f"DRIVER={{{config.DB_DRIVER}}};"
-        f"SERVER={config.DB_SERVER};"
-        f"DATABASE={config.DB_DATABASE};"
-        "Trusted_Connection=yes;"
-        "ApplicationIntent=ReadOnly;"  # hint to SQL Server: read-only intent
-    )
-    conn = pyodbc.connect(conn_str, timeout=30)
+    conn = pyodbc.connect(_build_conn_str(), timeout=30)
     conn.timeout = 30
 
     try:
@@ -487,6 +536,7 @@ def generate_answer(question: str, results_context: str) -> str:
 def run_sql_pipeline(
     question: str,
     last_sql: str | None = None,
+    clearance=None,
 ) -> tuple[str, str, list[dict], list[str]]:
     """
     Full pipeline: schema context → generate SQL → validate → execute → answer.
@@ -494,6 +544,12 @@ def run_sql_pipeline(
     Args:
         question: the user's natural language question
         last_sql: the SQL from the previous turn (for follow-up context)
+        clearance: caller clearance set (audit #7); gates the Qdrant schema-context
+            retrieval below. NOTE: this does NOT yet gate which tables/rows the
+            generated SQL may read — real per-user table/row authorization belongs
+            in a read-only login scoped per role + SQL Server row-level security,
+            which is the documented next step (AUDIT.md #2). That is where the real
+            RBAC plugs into this path.
 
     Returns:
         (natural_language_answer, sql_used, rows, columns)
@@ -506,10 +562,12 @@ def run_sql_pipeline(
     from planner import resolve_scope, run_enumerate_pipeline
     scope, schema = resolve_scope(question)
     if scope == "enumerate":
+        # Enumerate reads only the live catalog (sys.tables) — schema structure,
+        # not data — so it is not clearance-gated at the Qdrant layer.
         return run_enumerate_pipeline(question, schema)
 
     # 1. Get schema context — for follow-ups, anchors to the previous table
-    schema_context, _ = get_schema_context(question, last_sql)
+    schema_context, _ = get_schema_context(question, last_sql, clearance=clearance)
 
     # 2. Generate SQL — pass last_sql so follow-ups stay on the right table
     sql = generate_sql(question, schema_context, last_sql)

@@ -70,14 +70,10 @@ SCHEMA_DENYLIST: set[str] = set(
 # ---------------------------------------------------------------------------
 
 def _open_connection() -> pyodbc.Connection:
-    conn_str = (
-        f"DRIVER={{{config.DB_DRIVER}}};"
-        f"SERVER={config.DB_SERVER};"
-        f"DATABASE={config.DB_DATABASE};"
-        "Trusted_Connection=yes;"
-        "ApplicationIntent=ReadOnly;"
-    )
-    conn = pyodbc.connect(conn_str, timeout=30)
+    # Reuse sql_generator's read-only-login-aware connection string so the
+    # enumerate path uses the same dedicated login as the direct path (audit #3).
+    import sql_generator
+    conn = pyodbc.connect(sql_generator._build_conn_str(), timeout=30)
     conn.timeout = 30
     return conn
 

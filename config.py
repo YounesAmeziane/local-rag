@@ -14,6 +14,12 @@ DB_SERVER   = os.getenv("DB_SERVER", "").strip()
 DB_DATABASE = os.getenv("DB_DATABASE", "MetadataRepository")
 DB_DRIVER   = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
 
+# Dedicated read-only SQL login for the query path (audit #3). When both are set,
+# execute_sql connects as this login (SELECT-only) instead of the service's
+# Windows identity. Setup: sql/create_readonly_login.sql.
+DB_READONLY_USER     = os.getenv("DB_READONLY_USER", "").strip()
+DB_READONLY_PASSWORD = os.getenv("DB_READONLY_PASSWORD", "")
+
 # Multi-step planner: schemas the enumeration tools will refuse to list.
 # Comma-separated in .env. Defaults to system/utility schemas.
 PLANNER_SCHEMA_DENYLIST = [
@@ -51,6 +57,26 @@ OLLAMA_HOST           = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 TOP_K                 = 5
 DOCS_TOP_K            = 5
+
+# ── Access control (audit #7) ─────────────────────────────────────────────────
+# Minimal clearance model. Full RBAC — roles / user_role_map / resource_permissions
+# tables + SQL Server row-level security — is a documented NEXT STEP (see AUDIT.md
+# #2); this only gates Qdrant retrieval. Every point carries a `clearance` label and
+# retrieval is DENY-BY-DEFAULT: a point whose clearance is not in the caller's
+# allowed set — including any untagged point — is excluded.
+DEFAULT_CLEARANCE = ("general",)          # what a caller with no explicit grant sees
+# Doc filename substrings whose chunks are tagged 'restricted' at ingest.
+RESTRICTED_DOC_PATTERNS = [
+    p.strip().lower()
+    for p in os.getenv("RESTRICTED_DOC_PATTERNS", "fha_hr_data,fha_leave_policy").split(",")
+    if p.strip()
+]
+# Clearance the local CLI (chat.py) runs with. Deny-by-default means the CLI sees
+# only 'general' unless the operator elevates here (e.g. APP_CLEARANCE=general,restricted).
+APP_CLEARANCE = tuple(
+    p.strip() for p in os.getenv("APP_CLEARANCE", ",".join(DEFAULT_CLEARANCE)).split(",")
+    if p.strip()
+)
 
 # ── Document ingestion ────────────────────────────────────────────────────────
 DOCS_FOLDER           = "docs"
