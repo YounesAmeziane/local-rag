@@ -43,7 +43,10 @@ VECTOR_SIZE           = 768
 EMBED_MODEL           = "nomic-embed-text"
 CHAT_MODEL            = "llama3.1:8b"
 ROUTER_MODEL          = "llama3.1:8b"
-OLLAMA_HOST           = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+# Use 127.0.0.1, NOT "localhost", for the same Windows IPv6 (::1) reason as
+# QDRANT_HOST (audit #1). The connection pool hides it at the median but the tail
+# is worse — measured embed stalls up to ~8s on localhost vs ~85ms on 127.0.0.1.
+OLLAMA_HOST           = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 TOP_K                 = 5
@@ -67,10 +70,11 @@ if not DB_SERVER:
         "-- refusing to silently fall back to 'localhost'."
     )
 
-if QDRANT_HOST == "localhost":
+if QDRANT_HOST == "localhost" or "//localhost" in OLLAMA_HOST:
     import sys
     print(
-        "config WARNING: QDRANT_HOST='localhost' incurs a ~2s IPv6 (::1) stall per "
-        "Qdrant call on Windows -- set QDRANT_HOST=127.0.0.1 (audit #1).",
+        "config WARNING: a host is set to 'localhost', which incurs an intermittent "
+        "multi-second IPv6 (::1) stall per call on Windows -- use 127.0.0.1 for "
+        "QDRANT_HOST and OLLAMA_HOST (audit #1).",
         file=sys.stderr,
     )
