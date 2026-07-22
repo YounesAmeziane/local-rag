@@ -111,13 +111,23 @@ def ask(
     show_sources: bool = False,
     topic_table: str | None = None,
     last_sql: str | None = None,
+    last_intent: str | None = None,
     clearance=None,
-) -> tuple[str, str | None, str, str | None]:
+) -> tuple[str, str | None, str, str | None, str | None]:
     """
     Full RAG pipeline for one turn.
-    Returns (answer, topic_table, route, last_sql).
+    Returns (answer, topic_table, route, last_sql, last_intent).
     last_sql is updated when route == 'sql' so follow-up questions
     stay anchored to the same table.
+
+    `last_intent` tracks whether the previous structured/both turn was a
+    "list columns" question. Only meaningful value today is "list_columns";
+    None means "something else / not applicable". It persists unchanged across
+    general/sql/unstructured turns (same convention as topic_table/last_sql) and
+    is only set/reset on structured/both turns. This lets a bare topic-switch
+    follow-up ("how about the scan_queue", no "columns" in it) still get the
+    FULL column list instead of a partial vector-search result, as long as the
+    conversation was already in a list-columns context.
 
     `clearance` is the caller's allowed clearance set (audit #7); None falls back
     to config.DEFAULT_CLEARANCE. It gates Qdrant retrieval deny-by-default. NOTE:
@@ -126,6 +136,7 @@ def ask(
     """
     if clearance is None:
         clearance = config.DEFAULT_CLEARANCE
+    old_topic_table = topic_table
     last_useful_reply = None
     assistant_turns = [m["content"] for m in reversed(history) if m["role"] == "assistant"]
     for reply in assistant_turns[:3]:
@@ -185,7 +196,7 @@ def ask(
         print()
 
         history.append({"role": "assistant", "content": full_response})
-        return full_response, topic_table, route, last_sql
+        return full_response, topic_table, route, last_sql, last_intent
 
     # ── SQL path — generate, execute, answer ──────────────────────────────────
     if route == "sql":
@@ -217,24 +228,37 @@ def ask(
             "content": f"[SQL: {sql_used}]\n\nResults: {len(rows)} rows\n\n{answer}"
         })
         new_last_sql = sql_used if sql_used not in ("INSUFFICIENT_SCHEMA",) else last_sql
-        return answer, topic_table, route, new_last_sql
+        return answer, topic_table, route, new_last_sql, last_intent
 
     # ── Retrieve based on route ───────────────────────────────────────────────
     context_parts = []
     rewritten_query = question
 
     if route in ("structured", "both"):
-        if retriever.is_list_columns_question(question) and topic_table and "." in topic_table:
+        topic_switched = topic_table != old_topic_table
+        # A bare topic-switch follow-up ("how about the scan_queue") doesn't repeat
+        # "columns", so is_list_columns_question() alone misses it — but if the
+        # conversation was already in a list-columns context and this turn didn't
+        # ask about one specific column, it should still get the FULL column list,
+        # not a partial vector-search result for whichever chunks happen to match.
+        want_full_columns = retriever.is_list_columns_question(question) or (
+            topic_switched
+            and last_intent == "list_columns"
+            and not retriever._COLUMN_PATTERN.search(question)
+        )
+        if want_full_columns and topic_table and "." in topic_table:
             schema, obj = topic_table.split(".", 1)
             payloads = retriever.fetch_all_columns(schema, obj, clearance=clearance)
             structured_context = retriever.format_all_columns_context(payloads)
             rewritten_query = f"[full-table fetch] {topic_table}"
             structured_results = []
+            last_intent = "list_columns"
         else:
             structured_results, rewritten_query = retriever.retrieve(
                 question, last_useful_reply, topic_table, clearance=clearance
             )
             structured_context = retriever.format_context(structured_results)
+            last_intent = None
         context_parts.append(structured_context)
 
     if route in ("unstructured", "both"):
@@ -286,7 +310,7 @@ def ask(
     print()
 
     history.append({"role": "assistant", "content": full_response})
-    return full_response, topic_table, route, last_sql
+    return full_response, topic_table, route, last_sql, last_intent
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -310,6 +334,7 @@ def main():
     last_question: str | None = None
     topic_table: str | None = None
     last_sql: str | None = None
+    last_intent: str | None = None
 
     while True:
         try:
@@ -330,13 +355,14 @@ def main():
             last_question = None
             topic_table = None
             last_sql = None
+            last_intent = None
             console.print("[dim]Conversation history cleared.[/dim]\n")
             continue
 
         if user_input.lower() == "/sources":
             if last_question:
                 ask(last_question, [], show_sources=True, topic_table=topic_table,
-                    last_sql=last_sql, clearance=config.APP_CLEARANCE)
+                    last_sql=last_sql, last_intent=last_intent, clearance=config.APP_CLEARANCE)
             else:
                 console.print("[dim]No previous question to show sources for.[/dim]")
             continue
@@ -346,9 +372,9 @@ def main():
             continue
 
         last_question = user_input
-        _, topic_table, last_route, last_sql = ask(
+        _, topic_table, last_route, last_sql, last_intent = ask(
             user_input, history, topic_table=topic_table, last_sql=last_sql,
-            clearance=config.APP_CLEARANCE,
+            last_intent=last_intent, clearance=config.APP_CLEARANCE,
         )
         console.print(
             f"[dim](turns: {len(history) // 2}  |  "
