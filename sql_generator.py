@@ -544,12 +544,7 @@ def run_sql_pipeline(
     Args:
         question: the user's natural language question
         last_sql: the SQL from the previous turn (for follow-up context)
-        clearance: caller clearance set (audit #7); gates the Qdrant schema-context
-            retrieval below. NOTE: this does NOT yet gate which tables/rows the
-            generated SQL may read — real per-user table/row authorization belongs
-            in a read-only login scoped per role + SQL Server row-level security,
-            which is the documented next step (AUDIT.md #2). That is where the real
-            RBAC plugs into this path.
+        clearance: caller clearance set (audit #7); gates the Qdrant schema-context retrieval below.
 
     Returns:
         (natural_language_answer, sql_used, rows, columns)

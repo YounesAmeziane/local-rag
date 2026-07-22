@@ -1,9 +1,3 @@
-# chat.py
-# CLI chat interface for the DataDictionary RAG system.
-#
-# Usage:
-#   python chat.py
-#
 # Commands:
 #   /sources  — show rewritten query + retrieved chunks for the last question
 #   /reset    — clear conversation history and start fresh
@@ -18,13 +12,6 @@ import sql_generator
 import config
 
 console = Console()
-
-# ── System prompt ─────────────────────────────────────────────────────────────
-#
-# Tightened on three things the stress test revealed:
-# 1. Don't synthesize across unrelated tables — use the most relevant chunk.
-# 2. Never contradict yourself (said "no info" then cited a reference).
-# 3. When the answer is in the context, give it directly without hedging.
 
 SYSTEM_PROMPT = """\
 You are a data governance assistant for Fraser Health Authority.
@@ -146,17 +133,25 @@ def ask(
             last_useful_reply = reply
             break
 
-    # Update topic_table from the user's question (immune to model drift)
+    # Update topic_table from the user's question
     table_match = retriever._TABLE_PATTERN.search(question)
     if table_match:
         schema, obj = table_match.group(1), table_match.group(2)
         if schema.lower() not in ("information_schema", "sys", "dbo"):
             topic_table = f"{schema}.{obj}"
+    elif retriever.is_list_columns_question(question):
+        # No "schema.table" dot-notation, but a column question naming a bare
+        # table (e.g. "consistency_runs" not "dm_dq.consistency_runs") — resolve
+        # it against the Data Dictionary so the exact fetch_all_columns bypass
+        # still fires instead of falling through to vector search.
+        resolved = retriever.resolve_bare_table_name(question, clearance=clearance)
+        if resolved:
+            topic_table = f"{resolved[0]}.{resolved[1]}"
 
     # ── Route ─────────────────────────────────────────────────────────────────
     route = router.route(question)
 
-    # ── General chit-chat — skip retrieval entirely ──────────────────────────
+    # ── General chit-chat skip retrieval entirely ──────────────────────────
     if route == "general":
         if show_sources:
             console.print(f"[dim]Route: [bold]general[/bold] — no retrieval[/dim]")
@@ -169,7 +164,7 @@ def ask(
             model=config.CHAT_MODEL,
             messages=messages,
             stream=True,
-            options={"temperature": 0.5},  # a bit warmer for natural conversation
+            options={"temperature": 0.5},
         )
 
         console.print()
@@ -195,7 +190,6 @@ def ask(
 
         answer, sql_used, rows, columns = sql_generator.run_sql_pipeline(question, last_sql, clearance=clearance)
 
-        # Always show the full generated SQL
         if sql_used not in ("INSUFFICIENT_SCHEMA",):
             console.rule("[dim]Generated SQL[/dim]")
             console.print(f"[cyan]{sql_used}[/cyan]")
@@ -214,7 +208,6 @@ def ask(
             "role": "assistant",
             "content": f"[SQL: {sql_used}]\n\nResults: {len(rows)} rows\n\n{answer}"
         })
-        # Pass the executed SQL forward so follow-up questions stay on the right table
         new_last_sql = sql_used if sql_used not in ("INSUFFICIENT_SCHEMA",) else last_sql
         return answer, topic_table, route, new_last_sql
 

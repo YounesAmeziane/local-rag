@@ -1,14 +1,3 @@
-# router.py
-# LLM-based query router that classifies each question into one of five paths:
-#   "structured"   → data_dictionary collection (schema/column questions)
-#   "unstructured" → documents collection (policy/content questions)
-#   "both"         → retrieve from both, merge context
-#   "general"      → no retrieval — greetings, small talk, meta questions
-#   "sql"          → generate and execute a SQL SELECT query
-#
-# Uses llama3.1:8b at temperature=0 — classification, not creative work.
-# Falls back to "both" on error/unexpected output.
-
 import ollama
 import config
 
@@ -61,6 +50,13 @@ is never "general", even though it resembles a casual conversational question. O
 classify as "general" if the message does not ask about any person, system, table, or
 document topic at all (e.g. pure greetings, thanks, or meta questions about you).
 
+IMPORTANT: Asking how many COLUMNS a table has, or what columns/fields a table has, is
+STRUCTURED — the Data Dictionary already stores one row per column, so this is a schema
+lookup, never a live query. This applies even when phrased as "how many" (e.g. "how many
+columns does X have"). Contrast with asking how many ROWS a table has, or any question
+about the table's actual data/values — that IS "sql", since it needs a live query against
+real data, not schema metadata. "Columns" = structured. "Rows"/"records"/actual data = sql.
+
 Output ONLY the label — one word, lowercase, no punctuation, no explanation.
 """
 
@@ -97,13 +93,17 @@ Q: What's the difference between the FULL, SIMPLE, and BULK_LOGGED recovery mode
 Q: What is Tanveer currently working on? → unstructured
 Q: What priority is the ICIMS Resume item, and who owns it? → unstructured
 Q: Who is responsible for the Environment Design project? → unstructured
+Q: How many columns does the consistency_runs table have? → structured
+Q: What columns does consistency_runs have? → structured
+Q: How many rows are in consistency_runs? → sql
+Q: How many rows does the scan_queue table have? → sql
 """
 
 def route(question: str) -> str:
-    """
-    Classifies a question into one of: structured, unstructured, both, general, sql.
-    Falls back to 'both' on any error or unexpected output.
-    """
+    
+    #Classifies a question into one of: structured, unstructured, both, general, sql.
+    #Falls back to 'both' on any error or unexpected output.
+    
     try:
         resp = _client.chat(
             model=config.ROUTER_MODEL,

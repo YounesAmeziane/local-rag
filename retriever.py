@@ -96,6 +96,60 @@ def fetch_all_columns(schema: str, table: str, clearance=None) -> list[dict]:
     return payloads
 
 
+# Generic schema vocabulary that must never be treated as a candidate table name,
+# even if a real table happens to be named exactly this (e.g. mdm.Columns) — these
+# words appear in virtually every column/structure question by construction
+# (is_list_columns_question triggers on them), so matching them as "the table the
+# user means" would collide on nearly every call.
+_GENERIC_STRUCTURE_WORDS = {
+    "column", "columns", "field", "fields", "attribute", "attributes",
+    "schema", "structure", "definition", "table", "tables",
+}
+
+
+def resolve_bare_table_name(question: str, clearance=None) -> tuple[str, str] | None:
+    """Resolve a schema-less table name mentioned in the question (e.g.
+    "consistency_runs" instead of "dm_dq.consistency_runs") against the known
+    tables in the Data Dictionary. Returns (schema, table) if exactly one known
+    table name appears as a whole word in the question, else None (not found,
+    or ambiguous across schemas).
+
+    Only meant to be called for column/structure questions (is_list_columns_question)
+    — scoped narrowly so a stray word that happens to match a table name doesn't
+    misfire on unrelated questions.
+    """
+    known: dict[str, set[tuple[str, str]]] = {}
+    offset = None
+    while True:
+        points, offset = _qdrant_client.scroll(
+            collection_name=config.COLLECTION_NAME,
+            scroll_filter=Filter(must=[_clearance_condition(clearance)]),
+            limit=500,
+            offset=offset,
+            with_payload=["schema_name", "object_name"],
+            with_vectors=False,
+        )
+        for p in points:
+            obj = p.payload.get("object_name")
+            schema = p.payload.get("schema_name")
+            if obj and schema:
+                known.setdefault(obj.lower(), set()).add((schema, obj))
+        if offset is None:
+            break
+
+    q_lower = question.lower()
+    matches: set[tuple[str, str]] = set()
+    for name_lower, pairs in known.items():
+        if name_lower in _GENERIC_STRUCTURE_WORDS:
+            continue
+        if re.search(rf"\b{re.escape(name_lower)}\b", q_lower):
+            matches |= pairs
+
+    if len(matches) == 1:
+        return matches.pop()
+    return None  # not found, or ambiguous (same table name in multiple schemas)
+
+
 def format_all_columns_context(payloads: list[dict]) -> str:
     """
     Renders a complete column listing for the LLM prompt.
