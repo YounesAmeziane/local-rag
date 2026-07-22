@@ -133,23 +133,31 @@ def ask(
             last_useful_reply = reply
             break
 
+    # ── Route ─────────────────────────────────────────────────────────────────
+    # Computed before topic_table tracking below, since bare-table-name resolution
+    # is gated on the route (only worth a Data Dictionary lookup when the question
+    # actually landed in DataDictionary territory).
+    route = router.route(question)
+
     # Update topic_table from the user's question
     table_match = retriever._TABLE_PATTERN.search(question)
     if table_match:
         schema, obj = table_match.group(1), table_match.group(2)
         if schema.lower() not in ("information_schema", "sys", "dbo"):
             topic_table = f"{schema}.{obj}"
-    elif retriever.is_list_columns_question(question):
-        # No "schema.table" dot-notation, but a column question naming a bare
-        # table (e.g. "consistency_runs" not "dm_dq.consistency_runs") — resolve
-        # it against the Data Dictionary so the exact fetch_all_columns bypass
-        # still fires instead of falling through to vector search.
+    elif route in ("structured", "both", "sql"):
+        # No "schema.table" dot-notation, but the question was routed into
+        # DataDictionary territory — it may still name a bare table (e.g. "how
+        # about the scan_queue", not "how many columns does scan_queue have").
+        # Not gating this on is_list_columns_question() specifically: a topic
+        # switch doesn't have to repeat "columns" to be a topic switch. Resolve
+        # it against the Data Dictionary so topic_table tracks the real subject
+        # instead of staying stuck on whatever table was named last, which used
+        # to cause both wrong-table answers on this turn and stale answers on
+        # every vague follow-up after it.
         resolved = retriever.resolve_bare_table_name(question, clearance=clearance)
         if resolved:
             topic_table = f"{resolved[0]}.{resolved[1]}"
-
-    # ── Route ─────────────────────────────────────────────────────────────────
-    route = router.route(question)
 
     # ── General chit-chat skip retrieval entirely ──────────────────────────
     if route == "general":

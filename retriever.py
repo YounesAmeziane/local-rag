@@ -114,9 +114,12 @@ def resolve_bare_table_name(question: str, clearance=None) -> tuple[str, str] | 
     table name appears as a whole word in the question, else None (not found,
     or ambiguous across schemas).
 
-    Only meant to be called for column/structure questions (is_list_columns_question)
-    — scoped narrowly so a stray word that happens to match a table name doesn't
-    misfire on unrelated questions.
+    Callers should only invoke this once a question has already been routed into
+    DataDictionary territory (structured/both/sql) — not on every message — both to
+    avoid the collection scroll on unrelated questions and because a stray word
+    matching a table name is more likely a false positive outside that context.
+    The _GENERIC_STRUCTURE_WORDS exclusion below guards the main false-positive
+    case (e.g. a real table literally named "Columns") regardless of caller.
     """
     known: dict[str, set[tuple[str, str]]] = {}
     offset = None
