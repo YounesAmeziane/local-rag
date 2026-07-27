@@ -112,6 +112,7 @@ def ask(
     topic_table: str | None = None,
     last_sql: str | None = None,
     last_intent: str | None = None,
+    last_route: str | None = None,
     clearance=None,
 ) -> tuple[str, str | None, str, str | None, str | None]:
     """
@@ -148,7 +149,7 @@ def ask(
     # Computed before topic_table tracking below, since bare-table-name resolution
     # is gated on the route (only worth a Data Dictionary lookup when the question
     # actually landed in DataDictionary territory).
-    route = router.route(question)
+    route = router.route(question, last_route=last_route)
 
     # Update topic_table from the user's question
     table_match = retriever._TABLE_PATTERN.search(question)
@@ -157,15 +158,6 @@ def ask(
         if schema.lower() not in ("information_schema", "sys", "dbo"):
             topic_table = f"{schema}.{obj}"
     elif route in ("structured", "both", "sql"):
-        # No "schema.table" dot-notation, but the question was routed into
-        # DataDictionary territory — it may still name a bare table (e.g. "how
-        # about the scan_queue", not "how many columns does scan_queue have").
-        # Not gating this on is_list_columns_question() specifically: a topic
-        # switch doesn't have to repeat "columns" to be a topic switch. Resolve
-        # it against the Data Dictionary so topic_table tracks the real subject
-        # instead of staying stuck on whatever table was named last, which used
-        # to cause both wrong-table answers on this turn and stale answers on
-        # every vague follow-up after it.
         resolved = retriever.resolve_bare_table_name(question, clearance=clearance)
         if resolved:
             topic_table = f"{resolved[0]}.{resolved[1]}"
@@ -236,11 +228,6 @@ def ask(
 
     if route in ("structured", "both"):
         topic_switched = topic_table != old_topic_table
-        # A bare topic-switch follow-up ("how about the scan_queue") doesn't repeat
-        # "columns", so is_list_columns_question() alone misses it — but if the
-        # conversation was already in a list-columns context and this turn didn't
-        # ask about one specific column, it should still get the FULL column list,
-        # not a partial vector-search result for whichever chunks happen to match.
         want_full_columns = retriever.is_list_columns_question(question) or (
             topic_switched
             and last_intent == "list_columns"
@@ -335,6 +322,7 @@ def main():
     topic_table: str | None = None
     last_sql: str | None = None
     last_intent: str | None = None
+    last_route: str | None = None
 
     while True:
         try:
@@ -356,13 +344,15 @@ def main():
             topic_table = None
             last_sql = None
             last_intent = None
+            last_route = None
             console.print("[dim]Conversation history cleared.[/dim]\n")
             continue
 
         if user_input.lower() == "/sources":
             if last_question:
                 ask(last_question, [], show_sources=True, topic_table=topic_table,
-                    last_sql=last_sql, last_intent=last_intent, clearance=config.APP_CLEARANCE)
+                    last_sql=last_sql, last_intent=last_intent, last_route=last_route,
+                    clearance=config.APP_CLEARANCE)
             else:
                 console.print("[dim]No previous question to show sources for.[/dim]")
             continue
@@ -374,7 +364,7 @@ def main():
         last_question = user_input
         _, topic_table, last_route, last_sql, last_intent = ask(
             user_input, history, topic_table=topic_table, last_sql=last_sql,
-            last_intent=last_intent, clearance=config.APP_CLEARANCE,
+            last_intent=last_intent, last_route=last_route, clearance=config.APP_CLEARANCE,
         )
         console.print(
             f"[dim](turns: {len(history) // 2}  |  "

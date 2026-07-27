@@ -1,3 +1,4 @@
+import re
 import ollama
 import config
 
@@ -99,11 +100,32 @@ Q: How many rows are in consistency_runs? → sql
 Q: How many rows does the scan_queue table have? → sql
 """
 
-def route(question: str) -> str:
-    
-    #Classifies a question into one of: structured, unstructured, both, general, sql.
-    #Falls back to 'both' on any error or unexpected output.
-    
+_DATA_ROUTES = ("structured", "unstructured", "both", "sql")
+
+# A short follow-up that leans on a pronoun ("those", "that one", "them") cannot be
+# understood in isolation. The LLM tends to file it under 'general', which in chat.py
+# short-circuits BEFORE any topic tracking or retrieval runs. When the conversation is
+# already in an active data route, such a reference should continue that route instead.
+_PRONOUN_FOLLOWUP_RE = re.compile(
+    r"\b(those|these|that|this|it|its|them|the same|the one|the ones)\b",
+    re.IGNORECASE,
+)
+
+
+def route(question: str, last_route: str | None = None) -> str:
+    """Classify a question into structured / unstructured / both / general / sql.
+
+    `last_route` carries the previous turn's route so a context-dependent follow-up
+    ("what about those?") continues the active conversation instead of being judged as
+    a bare sentence. Falls back to 'both' on any error or unexpected output.
+
+    Design note: the conversation context is applied as a DETERMINISTIC floor, not by
+    feeding context into the classifier prompt. Injecting "this is a follow-up, don't
+    say general" into the LLM was tried and dragged genuine greetings ("hello",
+    "thanks!") into the prior data route. The floor below is precise — it only rescues
+    a message that (a) the LLM already called 'general' AND (b) leans on a pronoun with
+    no standalone subject — so greetings/meta (no pronoun) are untouched.
+    """
     try:
         resp = _client.chat(
             model=config.ROUTER_MODEL,
@@ -114,8 +136,15 @@ def route(question: str) -> str:
             options={"temperature": 0, "num_predict": 10},
         )
         label = resp["message"]["content"].strip().lower().split()[0]
-        if label in ("structured", "unstructured", "both", "general", "sql"):
-            return label
-        return "both"
+        if label not in ("structured", "unstructured", "both", "general", "sql"):
+            label = "both"
     except Exception:
         return "both"
+
+    # Deterministic floor: a pronoun-based follow-up inside an active data conversation
+    # must never collapse to 'general' (which in chat.py skips topic tracking + retrieval
+    # entirely). Inherit the prior route. Kept deterministic so classifier variance can't
+    # reintroduce the bug, and narrow (pronoun required) so greetings stay 'general'.
+    if label == "general" and last_route in _DATA_ROUTES and _PRONOUN_FOLLOWUP_RE.search(question):
+        return last_route
+    return label
