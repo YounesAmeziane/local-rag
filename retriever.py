@@ -188,6 +188,85 @@ def format_all_columns_context(payloads: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ── Full-schema table listing (bypasses vector search) ────────────────────────
+#
+# "What tables are in schema X" is an enumeration question — like "list all columns
+# in table Y" — and must be answered by an EXHAUSTIVE scroll, not top-k vector
+# search. Vector search returns a partial, imprecise set (it surfaced only 2 of the
+# 4 dq tables and 2 tables from the wrong schema), so the model reported the wrong
+# count. This is the schema-level sibling of fetch_all_columns.
+
+_TABLES_INTENT_RE = re.compile(r"\btables?\b", re.IGNORECASE)
+# The "<word> schema" alternative excludes common articles/prepositions so that
+# "in schema sec" doesn't capture "in" (from "in schema") ahead of "sec" (from
+# "schema sec"); leftmost-match would otherwise grab the wrong token.
+_SCHEMA_REF_RE = re.compile(
+    r"\bschema\s+\[?([a-zA-Z_][a-zA-Z0-9_]*)\]?"       # "schema dq"
+    r"|\b(?!the\b|in\b|a\b|an\b|this\b|that\b|which\b|each\b|every\b|any\b|no\b|of\b)"
+    r"\[?([a-zA-Z_][a-zA-Z0-9_]*)\]?\s+schema\b",       # "dq schema" / "the dq schema"
+    re.IGNORECASE,
+)
+
+
+def resolve_list_tables_question(question: str, clearance=None) -> tuple[str, list[dict]] | None:
+    """If the question asks to list/count the tables in a specific schema (e.g.
+    "what tables are in the dq schema"), return (canonical_schema, tables) via ONE
+    exhaustive scroll, else None. tables is [{"object_name","object_description"}]
+    sorted by name. Returns None if the referenced schema isn't in the Data
+    Dictionary, so ambiguous phrasings fall through to normal handling. Case
+    -insensitive on the schema name (resolves to the catalog's canonical casing)."""
+    if not _TABLES_INTENT_RE.search(question):
+        return None
+    m = _SCHEMA_REF_RE.search(question)
+    if not m:
+        return None
+    candidate = (m.group(1) or m.group(2) or "").lower()
+    if not candidate:
+        return None
+
+    by_schema: dict[str, tuple[str, dict]] = {}
+    offset = None
+    while True:
+        points, offset = _qdrant_client.scroll(
+            collection_name=config.COLLECTION_NAME,
+            scroll_filter=Filter(must=[_clearance_condition(clearance)]),
+            limit=500, offset=offset,
+            with_payload=["schema_name", "object_name", "object_description"],
+            with_vectors=False,
+        )
+        for p in points:
+            s = p.payload.get("schema_name")
+            obj = p.payload.get("object_name")
+            if not s or not obj:
+                continue
+            canonical, tbls = by_schema.setdefault(s.lower(), (s, {}))
+            tbls.setdefault(obj, p.payload.get("object_description", ""))
+        if offset is None:
+            break
+
+    if candidate not in by_schema:
+        return None
+    canonical, tbls = by_schema[candidate]
+    tables = [{"object_name": k, "object_description": v} for k, v in sorted(tbls.items())]
+    return canonical, tables
+
+
+def format_all_tables_context(schema: str, tables: list[dict]) -> str:
+    """Renders a complete table listing for one schema for the LLM prompt."""
+    if not tables:
+        return f"No tables found in schema '{schema}'."
+    lines = [
+        f"Schema: {schema}",
+        f"Total tables: {len(tables)}",
+        "",
+        f"{'Table Name':<40} Description",
+        "-" * 100,
+    ]
+    for t in tables:
+        lines.append(f"{t['object_name']:<40} {t.get('object_description', '')}")
+    return "\n".join(lines)
+
+
 # ── Query rewriting ───────────────────────────────────────────────────────────
 
 def _extract_context(text: str) -> tuple[str | None, str | None]:

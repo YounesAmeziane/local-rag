@@ -227,13 +227,22 @@ def ask(
     rewritten_query = question
 
     if route in ("structured", "both"):
+        # "What tables are in schema X" is an enumeration question: answer it from an
+        # exhaustive scroll, not partial vector search (which returned the wrong count).
+        tables_hit = retriever.resolve_list_tables_question(question, clearance=clearance)
         topic_switched = topic_table != old_topic_table
         want_full_columns = retriever.is_list_columns_question(question) or (
             topic_switched
             and last_intent == "list_columns"
             and not retriever._COLUMN_PATTERN.search(question)
         )
-        if want_full_columns and topic_table and "." in topic_table:
+        if tables_hit:
+            schema_name, tables = tables_hit
+            structured_context = retriever.format_all_tables_context(schema_name, tables)
+            rewritten_query = f"[schema tables] {schema_name}"
+            structured_results = []
+            last_intent = None
+        elif want_full_columns and topic_table and "." in topic_table:
             schema, obj = topic_table.split(".", 1)
             payloads = retriever.fetch_all_columns(schema, obj, clearance=clearance)
             structured_context = retriever.format_all_columns_context(payloads)
