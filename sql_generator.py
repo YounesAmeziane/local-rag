@@ -8,7 +8,11 @@
 #   4. Execute against SQL Server
 #   5. Return results + the generated SQL for transparency
 
+import logging
+import logging.handlers
 import re
+from pathlib import Path
+
 import pyodbc
 import ollama
 from qdrant_client.models import ScoredPoint
@@ -17,6 +21,21 @@ import config
 import retriever
 
 _ollama = ollama.Client(host=config.OLLAMA_HOST)
+
+# Module logger -> logs/sql_generator.log (mirrors planner.py). Operational notices
+# like the read-only-login warning go here, NOT to the console — printing them to
+# stderr interleaved them into interactive answers mid-stream.
+_LOG_DIR = Path("logs")
+_LOG_DIR.mkdir(exist_ok=True)
+log = logging.getLogger("sql_generator")
+if not log.handlers:
+    log.setLevel(logging.INFO)
+    _h = logging.handlers.RotatingFileHandler(
+        _LOG_DIR / "sql_generator.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S"))
+    log.addHandler(_h)
+    log.propagate = False
 
 # ── SQL generation prompt ─────────────────────────────────────────────────────
 
@@ -352,14 +371,6 @@ def repair_sql(question: str, schema_context: str, bad_sql: str, error: str) -> 
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
-#
-# Allowlist validation (audit #3). The old blocklist let several SELECT-shaped
-# writes/abuses through — SELECT ... INTO (creates a table), stacked SELECT INTO,
-# WAITFOR DELAY (stall), OPENQUERY/OPENROWSET (linked servers) — while wrongly
-# rejecting legitimate WITH...SELECT CTEs. This validator instead requires a
-# SINGLE read-only statement (SELECT or WITH...SELECT) and rejects data-modifying,
-# external-data, and stalling constructs. It is defense-in-depth; the primary
-# control is a read-only DB login (see execute_sql / sql/create_readonly_login.sql).
 
 _FORBIDDEN = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|MERGE|"
@@ -406,9 +417,6 @@ def validate_sql(sql: str) -> tuple[bool, str]:
 _warned_trusted = False
 
 def _build_conn_str() -> str:
-    """Connection string for the SQL path. Prefers the dedicated read-only login
-    (audit #3) when configured; otherwise falls back to the service's Windows
-    identity and warns once — the validator is then the only barrier."""
     base = (
         f"DRIVER={{{config.DB_DRIVER}}};"
         f"SERVER={config.DB_SERVER};"
@@ -420,12 +428,10 @@ def _build_conn_str() -> str:
 
     global _warned_trusted
     if not _warned_trusted:
-        import sys
-        print(
-            "sql_generator WARNING: DB_READONLY_USER not set -- executing generated "
-            "SQL under the service's Windows identity, not a read-only login. The "
-            "validator is the only barrier. See sql/create_readonly_login.sql (audit #3).",
-            file=sys.stderr,
+        log.warning(
+            "DB_READONLY_USER not set -- executing generated SQL under the service's "
+            "Windows identity, not a read-only login. The validator is the only barrier. "
+            "See sql/create_readonly_login.sql (audit #3)."
         )
         _warned_trusted = True
     return base + "Trusted_Connection=yes;"
@@ -508,7 +514,7 @@ You have just executed a SQL query against the FHA database and received results
 Answer the user's question in clear, natural language using the query results.
 Be concise and precise. If the result is a single number, state it directly.
 If it is a table of results, summarize the key findings and mention notable values.
-Do not reproduce the full table in your answer unless it is very small (3 rows or fewer).
+Do not reproduce the full table in your answer unless it is very small (5 rows or fewer).
 Always mention what the query was counting or selecting so the answer is unambiguous.
 """
 
@@ -582,7 +588,7 @@ def run_sql_pipeline(
             sql, [], []
         )
 
-    # 4. Execute — with one self-correction attempt on failure (Fix C).
+    # 4. Execute — with one self-correction attempt on failure
     try:
         rows, columns = execute_sql(sql)
     except Exception as e:
