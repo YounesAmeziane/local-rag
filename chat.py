@@ -236,10 +236,32 @@ def ask(
             and last_intent == "list_columns"
             and not retriever._COLUMN_PATTERN.search(question)
         )
+        # Comparison / multi-table questions name 2+ tables ("difference between
+        # mdm.Assets and mdm.Columns"). Give the model the FULL schema of each named
+        # table, instead of the topic_table filter starving all but the first-named
+        # one (which made comparisons falsely answer "I don't have that").
+        named_tables: list[tuple[str, str]] = []
+        for _s, _o in retriever._TABLE_PATTERN.findall(question):
+            if _s.lower() not in ("information_schema", "sys") and (_s, _o) not in named_tables:
+                named_tables.append((_s, _o))
+        multi_blocks = []
+        if len(named_tables) >= 2:
+            for _s, _o in named_tables[:3]:
+                _cols = retriever.fetch_all_columns(_s, _o, clearance=clearance)
+                if _cols:
+                    multi_blocks.append(retriever.format_all_columns_context(_cols))
+            if len(multi_blocks) < 2:
+                multi_blocks = []  # fewer than 2 resolved to real tables — not a comparison
+
         if tables_hit:
             schema_name, tables = tables_hit
             structured_context = retriever.format_all_tables_context(schema_name, tables)
             rewritten_query = f"[schema tables] {schema_name}"
+            structured_results = []
+            last_intent = None
+        elif multi_blocks:
+            structured_context = "\n\n".join(multi_blocks)
+            rewritten_query = "[multi-table] " + ", ".join(f"{s}.{o}" for s, o in named_tables[:3])
             structured_results = []
             last_intent = None
         elif want_full_columns and topic_table and "." in topic_table:

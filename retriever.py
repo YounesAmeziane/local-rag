@@ -209,19 +209,16 @@ _SCHEMA_REF_RE = re.compile(
 
 
 def resolve_list_tables_question(question: str, clearance=None) -> tuple[str, list[dict]] | None:
-    """If the question asks to list/count the tables in a specific schema (e.g.
-    "what tables are in the dq schema"), return (canonical_schema, tables) via ONE
-    exhaustive scroll, else None. tables is [{"object_name","object_description"}]
-    sorted by name. Returns None if the referenced schema isn't in the Data
-    Dictionary, so ambiguous phrasings fall through to normal handling. Case
-    -insensitive on the schema name (resolves to the catalog's canonical casing)."""
+    """If the question asks to list/count the tables in a specific schema, return
+    (canonical_schema, tables) via ONE exhaustive scroll, else None. tables is
+    [{"object_name","object_description"}] sorted by name.
+
+    Recognizes both phrasings: an explicit schema reference ("in the dq schema",
+    "schema dq") AND a bare known-schema name ("what tables exist in dq") — the
+    bare form is validated against the Data Dictionary's actual schema names, so a
+    stray word can't false-match. Case-insensitive; returns None (falls through to
+    normal handling) if no schema resolves or the reference is ambiguous."""
     if not _TABLES_INTENT_RE.search(question):
-        return None
-    m = _SCHEMA_REF_RE.search(question)
-    if not m:
-        return None
-    candidate = (m.group(1) or m.group(2) or "").lower()
-    if not candidate:
         return None
 
     by_schema: dict[str, tuple[str, dict]] = {}
@@ -244,7 +241,27 @@ def resolve_list_tables_question(question: str, clearance=None) -> tuple[str, li
         if offset is None:
             break
 
-    if candidate not in by_schema:
+    # 1. Explicit "schema X" / "X schema" phrasing.
+    candidate = None
+    m = _SCHEMA_REF_RE.search(question)
+    if m:
+        tok = (m.group(1) or m.group(2) or "").lower()
+        if tok in by_schema:
+            candidate = tok
+
+    # 2. Fall back to a bare known-schema name mentioned as a whole word and not
+    #    part of a schema.table reference (the "(?!\.)" excludes e.g. the "dq" in
+    #    "dq.Results"). Require exactly one distinct schema to avoid ambiguity.
+    if candidate is None:
+        q_lower = question.lower()
+        hits = {
+            s for s in by_schema
+            if re.search(rf"\b{re.escape(s)}\b(?!\.)", q_lower)
+        }
+        if len(hits) == 1:
+            candidate = hits.pop()
+
+    if candidate is None or candidate not in by_schema:
         return None
     canonical, tbls = by_schema[candidate]
     tables = [{"object_name": k, "object_description": v} for k, v in sorted(tbls.items())]

@@ -98,6 +98,11 @@ Q: How many columns does the consistency_runs table have? → structured
 Q: What columns does consistency_runs have? → structured
 Q: How many rows are in consistency_runs? → sql
 Q: How many rows does the scan_queue table have? → sql
+Q: Where should draft or imported lineage be stored? → structured
+Q: Where should validated lineage be stored? → structured
+Q: What table should I use to store a business glossary term? → structured
+Q: What table maps glossary terms to assets or fields? → structured
+Q: Which tables support security audit evidence? → structured
 """
 
 _DATA_ROUTES = ("structured", "unstructured", "both", "sql")
