@@ -5,6 +5,8 @@
 # Run once (or re-run to refresh after DataDictionary changes):
 #   python ingest.py
 
+import sys
+
 import pyodbc
 import pandas as pd
 import ollama
@@ -13,6 +15,14 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 from rich.console import Console
 from rich.progress import track
 import config
+
+# Windows consoles default to cp1252, which can't encode the ✓/✗ status glyphs this
+# script prints -- forcing UTF-8 stops a run from dying on the success message.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 console = Console()
 
@@ -26,6 +36,10 @@ def load_data() -> pd.DataFrame:
         f"SERVER={config.DB_SERVER};"
         f"DATABASE={config.DB_DATABASE};"
         "Trusted_Connection=yes;"
+        # MetadataRepository is an AlwaysOn availability-group DB currently served
+        # from a read-only secondary, which REFUSES connections without read-only
+        # intent (error 978). Ingest is read-only anyway.
+        "ApplicationIntent=ReadOnly;"
     )
     conn = pyodbc.connect(conn_str)
     df = pd.read_sql(config.INGEST_QUERY, conn)
