@@ -56,6 +56,11 @@ STRICT RULES:
   Do NOT JOIN tables unless the question explicitly requires combining data from
   more than one. Aggregation on that single table — GROUP BY, COUNT, SUM, AVG,
   TOP N — is expected wherever the question calls for it.
+- COUNT QUESTIONS: a "how many", "how much", "number of", or "count of" question
+  returns a count, not raw column values. If it groups ("per X" / "by X" / "each
+  X") write SELECT <group column>, COUNT(*) ... GROUP BY <group column> (group
+  column FIRST); otherwise return a single COUNT(*) or SUM(...).
+  "how many of those failed" -> SELECT COUNT(*) ... WHERE <failed condition>.
 - TOP 100: add it ONLY when returning raw rows with no aggregation.
   NEVER add TOP when the query contains COUNT, SUM, AVG, MIN, MAX, or GROUP BY.
   Aggregates produce their own natural result set — TOP would be wrong there.
@@ -64,6 +69,9 @@ STRICT RULES:
   paired with an ORDER BY on the relevant column in the correct direction
   (most recent / newest → ORDER BY <datetime> DESC; lowest → ORDER BY <col> ASC).
   TOP without ORDER BY returns an arbitrary set of rows and is wrong for these.
+- NULLABLE ORDER BY: when ordering ascending to find the lowest/worst/minimum on a
+  nullable column, add WHERE <col> IS NOT NULL so NULLs (sorted first) don't fill
+  the top rows.
 - Use meaningful column aliases for calculated fields (e.g. COUNT(*) AS TotalCount).
 - T-SQL BOOLEAN RULE: SQL Server does NOT support boolean expressions as SELECT column
   values. NEVER write: SELECT ColumnA > 0 AS SomeAlias — this is invalid T-SQL.
@@ -425,6 +433,31 @@ def repair_missing_order_by(question: str, schema_context: str, sql: str) -> str
     return out.strip()
 
 
+_ASC_SUPERLATIVE_RE = re.compile(r"\b(lowest|worst|least|minimum|smallest|fewest|bottom)\b", re.IGNORECASE)
+_ORDER_ASC_COL_RE = re.compile(r"ORDER\s+BY\s+(\[?[\w.]+\]?)\s+ASC", re.IGNORECASE)
+
+
+def _guard_null_order(question: str, sql: str) -> str:
+    # "lowest/worst by <nullable col>" ordered ASC returns NULLs first -> empty top
+    # rows. Add a NULL guard deterministically; skip GROUP BY/HAVING to stay safe.
+    if not _ASC_SUPERLATIVE_RE.search(question):
+        return sql
+    m = _ORDER_ASC_COL_RE.search(sql)
+    if not m:
+        return sql
+    col = m.group(1)
+    if re.search(re.escape(col) + r"\s+IS\s+NOT\s+NULL", sql, re.IGNORECASE):
+        return sql
+    idx = sql.upper().rfind("ORDER BY")
+    head, tail = sql[:idx], sql[idx:]
+    if re.search(r"\b(GROUP\s+BY|HAVING)\b", head, re.IGNORECASE):
+        return sql
+    kw = "AND" if re.search(r"\bWHERE\b", head, re.IGNORECASE) else "WHERE"
+    candidate = f"{head.rstrip()}\n{kw} {col} IS NOT NULL\n{tail}"
+    ok, _ = validate_sql(candidate)
+    return candidate if ok else sql
+
+
 # ── Validation ────────────────────────────────────────────────────────────────
 
 _FORBIDDEN = re.compile(
@@ -652,6 +685,8 @@ def run_sql_pipeline(
         ok_fixed, _ = validate_sql(fixed)
         if ok_fixed and _HAS_ORDER_BY_RE.search(fixed):
             sql = fixed
+
+    sql = _guard_null_order(question, sql)
 
     # 4. Execute — with one self-correction attempt on failure
     try:
