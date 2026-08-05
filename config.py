@@ -41,6 +41,15 @@ OLLAMA_HOST           = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 TOP_K                 = 5
 DOCS_TOP_K            = 5
 
+# ── Hybrid lexical+dense retrieval (audit #6) ─────────────────────────────────
+# When on, broad (non-topic-anchored) searches fuse dense cosine hits with a BM25
+# lexical ranker via Reciprocal Rank Fusion, recovering exact technical-token
+# matches that embeddings blur. Set HYBRID_SEARCH=0 to fall back to the exact
+# dense-only behavior (the reversibility valve — nothing else changes).
+HYBRID_SEARCH         = os.getenv("HYBRID_SEARCH", "1").strip().lower() not in ("0", "false", "no", "off")
+HYBRID_CANDIDATE_POOL = int(os.getenv("HYBRID_CANDIDATE_POOL", "20"))  # per-ranker pool before fusion
+RRF_K                 = int(os.getenv("RRF_K", "60"))                  # RRF damping constant
+
 DEFAULT_CLEARANCE = ("general",)
 RESTRICTED_DOC_PATTERNS = [
     p.strip().lower()

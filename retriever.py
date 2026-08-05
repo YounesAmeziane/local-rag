@@ -9,10 +9,12 @@
 #      → rewrite → embed → Qdrant cosine search → top-k chunks
 
 import re
+from dataclasses import dataclass
 import ollama
 from qdrant_client import QdrantClient
 from qdrant_client.models import ScoredPoint, Filter, FieldCondition, MatchValue, MatchAny
 import config
+import lexical
 
 
 # ── Access control (audit #7) ─────────────────────────────────────────────────
@@ -30,6 +32,77 @@ _qdrant_client = QdrantClient(
     host=config.QDRANT_HOST, port=config.QDRANT_PORT,
     grpc_port=config.QDRANT_GRPC_PORT, prefer_grpc=True,
 )
+
+
+# ── Hybrid lexical index + Reciprocal Rank Fusion (audit #6) ───────────────────
+
+@dataclass
+class Hit:
+    """A fused (dense+lexical) search result. Downstream formatters read only
+    .payload and .score; .id exists for de-duplication during fusion. Shaped to be
+    a drop-in for the Qdrant ScoredPoints the retrieve* functions used to return."""
+    id: object
+    score: float
+    payload: dict
+
+
+_lexical_indexes: dict[str, lexical.BM25Index] = {}
+
+
+def _lexical_index(collection: str) -> lexical.BM25Index:
+    """Lazily build (once per process, then cache) a BM25 index over every point's
+    `text` in a collection. Built from a single Qdrant scroll — the collections
+    change only on re-ingest, so a per-process cache is correct for a chat session.
+    A long-running server rebuilds by restarting after ingest."""
+    idx = _lexical_indexes.get(collection)
+    if idx is None:
+        docs: list[tuple] = []
+        offset = None
+        while True:
+            points, offset = _qdrant_client.scroll(
+                collection_name=collection,
+                limit=500, offset=offset,
+                with_payload=True, with_vectors=False,
+            )
+            docs.extend((p.id, p.payload.get("text", ""), p.payload) for p in points)
+            if offset is None:
+                break
+        idx = lexical.BM25Index(docs)
+        _lexical_indexes[collection] = idx
+    return idx
+
+
+def _clearance_allows(payload: dict, clearance) -> bool:
+    """Python mirror of _clearance_condition, for filtering lexical candidates that
+    did not pass through Qdrant's server-side filter. Deny-by-default: a point with
+    no `clearance` label is excluded (fail closed), matching MatchAny semantics."""
+    allowed = set(clearance) if clearance else set(config.DEFAULT_CLEARANCE)
+    label = payload.get("clearance")
+    if label is None:
+        return False
+    if isinstance(label, (list, tuple, set)):
+        return bool(set(label) & allowed)
+    return label in allowed
+
+
+def _rrf_fuse(dense_hits, sparse_hits, top_k: int, k: int | None = None) -> list[Hit]:
+    """Reciprocal Rank Fusion of the dense ranker (Qdrant ScoredPoints) and the
+    sparse ranker (BM25 (id, score, payload) tuples). A point's fused score is the
+    sum of 1/(k + rank) over each ranker it appears in (rank 0-based); points seen
+    by both rankers are thus boosted. Payload comes from whichever ranker saw the
+    point first (dense preferred)."""
+    if k is None:
+        k = config.RRF_K
+    scores: dict[object, float] = {}
+    payloads: dict[object, dict] = {}
+    for rank, h in enumerate(dense_hits):
+        scores[h.id] = scores.get(h.id, 0.0) + 1.0 / (k + rank + 1)
+        payloads[h.id] = h.payload
+    for rank, (pid, _score, pl) in enumerate(sparse_hits):
+        scores[pid] = scores.get(pid, 0.0) + 1.0 / (k + rank + 1)
+        payloads.setdefault(pid, pl)
+    ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+    return [Hit(id=pid, score=score, payload=payloads[pid]) for pid, score in ordered]
 
 
 # ── Regex helpers ─────────────────────────────────────────────────────────────
@@ -421,25 +494,32 @@ def retrieve(
 
     # Clearance gate is always applied (deny-by-default); topic_table narrows further.
     clearance_cond = _clearance_condition(clearance)
+    topic_active = bool(topic_table and "." in topic_table)
     must = [clearance_cond]
-    if topic_table and "." in topic_table:
+    if topic_active:
         schema, obj = topic_table.split(".", 1)
         must += [
             FieldCondition(key="schema_name", match=MatchValue(value=schema)),
             FieldCondition(key="object_name", match=MatchValue(value=obj)),
         ]
 
+    # Hybrid only helps broad questions; a topic-anchored follow-up is already
+    # filtered to one table's columns, where lexical adds nothing. When hybrid is
+    # active we pull a larger candidate pool per ranker before fusing down to top_k.
+    hybrid = config.HYBRID_SEARCH and not topic_active
+    dense_limit = config.HYBRID_CANDIDATE_POOL if hybrid else top_k
+
     results = _qdrant_client.search(
         collection_name=config.COLLECTION_NAME,
         query_vector=query_vector,
         query_filter=Filter(must=must),
-        limit=top_k,
+        limit=dense_limit,
         with_payload=True,
     )
 
     # Fallback when the topic_table narrowing yields nothing — but STILL enforce
     # clearance (never drop the security filter).
-    if not results and len(must) > 1:
+    if not results and topic_active:
         results = _qdrant_client.search(
             collection_name=config.COLLECTION_NAME,
             query_vector=query_vector,
@@ -448,7 +528,18 @@ def retrieve(
             with_payload=True,
         )
 
-    return results, rewritten
+    if not hybrid:
+        return results, rewritten
+
+    # Broad question: fuse dense with a BM25 lexical ranker so exact technical tokens
+    # the embedding blurred still surface. Lexical candidates get the same deny-by-
+    # default clearance filter the dense side received server-side.
+    sparse = [
+        cand
+        for cand in _lexical_index(config.COLLECTION_NAME).search(rewritten, config.HYBRID_CANDIDATE_POOL)
+        if _clearance_allows(cand[2], clearance)
+    ]
+    return _rrf_fuse(results, sparse, top_k), rewritten
 
 
 # ── Context formatting ────────────────────────────────────────────────────────
@@ -489,14 +580,27 @@ def retrieve_docs(
     Deny-by-default clearance gate; no topic_table filter — documents span all files.
     """
     query_vector = embed_query(question)
+    hybrid = config.HYBRID_SEARCH
+    dense_limit = config.HYBRID_CANDIDATE_POOL if hybrid else top_k
     results = _qdrant_client.search(
         collection_name=config.DOCS_COLLECTION_NAME,
         query_vector=query_vector,
         query_filter=Filter(must=[_clearance_condition(clearance)]),
-        limit=top_k,
+        limit=dense_limit,
         with_payload=True,
     )
-    return results
+    if not hybrid:
+        return results
+
+    # Docs are the corpus BM25 helps most (exact tokens: AES_KEY_BASE64, error codes,
+    # config keys). No topic anchoring here, so hybrid always applies. Same deny-by-
+    # default clearance filter on the lexical side.
+    sparse = [
+        cand
+        for cand in _lexical_index(config.DOCS_COLLECTION_NAME).search(question, config.HYBRID_CANDIDATE_POOL)
+        if _clearance_allows(cand[2], clearance)
+    ]
+    return _rrf_fuse(results, sparse, top_k)
 
 
 def format_docs_context(results: list[ScoredPoint]) -> str:
