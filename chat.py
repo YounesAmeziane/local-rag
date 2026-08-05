@@ -114,6 +114,7 @@ def ask(
     last_intent: str | None = None,
     last_route: str | None = None,
     clearance=None,
+    allow_decompose: bool = True,
 ) -> tuple[str, str | None, str, str | None, str | None]:
     """
     Full RAG pipeline for one turn.
@@ -144,6 +145,27 @@ def ask(
         if retriever._COLUMN_PATTERN.search(reply) or retriever._TABLE_PATTERN.search(reply):
             last_useful_reply = reply
             break
+
+    # ── Multi-intent compose ──────────────────────────────────────────────────
+    # Genuine two-part questions (e.g. a data count AND a docs topic) are split into
+    # independent sub-questions, each answered on its own route, then concatenated.
+    # Gated so single-intent questions never enter here (see router.decompose_question).
+    if allow_decompose:
+        subs = router.decompose_question(question)
+        if subs:
+            parts = []
+            tt, ls, li, lr = topic_table, last_sql, last_intent, last_route
+            for sq in subs:
+                ans, tt, lr, ls, li = ask(
+                    sq, list(history), show_sources=show_sources,
+                    topic_table=tt, last_sql=ls, last_intent=li,
+                    last_route=lr, clearance=clearance, allow_decompose=False,
+                )
+                parts.append(ans)
+            combined = "\n\n".join(parts)
+            history.append({"role": "user", "content": question})
+            history.append({"role": "assistant", "content": combined})
+            return combined, tt, lr, ls, li
 
     # ── Route ─────────────────────────────────────────────────────────────────
     # Computed before topic_table tracking below, since bare-table-name resolution
