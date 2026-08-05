@@ -59,6 +59,11 @@ STRICT RULES:
 - TOP 100: add it ONLY when returning raw rows with no aggregation.
   NEVER add TOP when the query contains COUNT, SUM, AVG, MIN, MAX, or GROUP BY.
   Aggregates produce their own natural result set — TOP would be wrong there.
+- ORDER BY WITH TOP: when the question asks for the "most recent", "latest",
+  "newest"/"oldest", "top/bottom N", "highest", or "lowest" rows, the TOP N MUST be
+  paired with an ORDER BY on the relevant column in the correct direction
+  (most recent / newest → ORDER BY <datetime> DESC; lowest → ORDER BY <col> ASC).
+  TOP without ORDER BY returns an arbitrary set of rows and is wrong for these.
 - Use meaningful column aliases for calculated fields (e.g. COUNT(*) AS TotalCount).
 - T-SQL BOOLEAN RULE: SQL Server does NOT support boolean expressions as SELECT column
   values. NEVER write: SELECT ColumnA > 0 AS SomeAlias — this is invalid T-SQL.
@@ -372,6 +377,54 @@ def repair_sql(question: str, schema_context: str, bad_sql: str, error: str) -> 
     return sql.strip()
 
 
+# ── Ordering-determinism guard (Q6) ───────────────────────────────────────────
+#
+# A superlative / ranked-subset question ("the 5 most recent jobs", "results with
+# the lowest pass rate") must pair TOP N with an ORDER BY, or TOP returns an
+# ARBITRARY N rows — a silent wrong answer (right count, wrong rows). The 8B
+# occasionally drops the ORDER BY, so we detect that exact defect deterministically
+# (ordering intent in the question + TOP-without-ORDER-BY in the SQL) and repair it.
+_ORDERING_INTENT_RE = re.compile(
+    r"\b(most recent|recent|latest|newest|oldest|earliest|highest|lowest|"
+    r"top\s+\d+|bottom\s+\d+|first\s+\d+|last\s+\d+|largest|smallest|"
+    r"biggest|greatest|worst|best)\b",
+    re.IGNORECASE,
+)
+_HAS_TOP_RE = re.compile(r"\bTOP\b", re.IGNORECASE)
+_HAS_ORDER_BY_RE = re.compile(r"\bORDER\s+BY\b", re.IGNORECASE)
+
+
+def _top_without_order_by(sql: str) -> bool:
+    return bool(_HAS_TOP_RE.search(sql)) and not _HAS_ORDER_BY_RE.search(sql)
+
+
+def repair_missing_order_by(question: str, schema_context: str, sql: str) -> str:
+    """Q6 guard repair. The query uses TOP N to answer a superlative question but has
+    no ORDER BY, so its rows are arbitrary. Ask the model to add the correct ORDER BY
+    (column + direction), changing nothing else. Returns the corrected SQL."""
+    resp = _ollama.chat(
+        model=config.CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": _SQL_SYSTEM},
+            {"role": "user", "content": (
+                f"Schema context from Data Dictionary:\n\n{schema_context}\n\n---\n\n"
+                f"The query below answers a question that asks for a ranked subset "
+                f"(e.g. most recent / highest / lowest), but it uses TOP without an "
+                f"ORDER BY, so it returns an arbitrary set of rows. Add an ORDER BY on "
+                f"the appropriate column in the correct direction (most recent / newest "
+                f"→ a datetime column DESC; lowest → that column ASC). Keep everything "
+                f"else the same. Output ONLY the corrected SELECT query.\n\n"
+                f"Question: {question}\n\nQuery:\n{sql}"
+            )},
+        ],
+        options={"temperature": 0},
+    )
+    out = resp["message"]["content"].strip()
+    out = re.sub(r"^```(?:sql)?\s*", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\s*```$", "", out)
+    return out.strip()
+
+
 # ── Validation ────────────────────────────────────────────────────────────────
 
 _FORBIDDEN = re.compile(
@@ -589,6 +642,16 @@ def run_sql_pipeline(
             f"I generated a query but it failed safety validation: {reason}",
             sql, [], []
         )
+
+    # 3b. Q6 ordering guard — a superlative question answered with TOP but no
+    # ORDER BY returns arbitrary rows. Repair that exact defect before executing;
+    # only accept the repair if it validates AND actually added an ORDER BY (else
+    # keep the original — never a regression).
+    if _ORDERING_INTENT_RE.search(question) and _top_without_order_by(sql):
+        fixed = repair_missing_order_by(question, schema_context, sql)
+        ok_fixed, _ = validate_sql(fixed)
+        if ok_fixed and _HAS_ORDER_BY_RE.search(fixed):
+            sql = fixed
 
     # 4. Execute — with one self-correction attempt on failure
     try:
