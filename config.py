@@ -42,11 +42,18 @@ TOP_K                 = 5
 DOCS_TOP_K            = 5
 
 # ── Hybrid lexical+dense retrieval (audit #6) ─────────────────────────────────
-# When on, broad (non-topic-anchored) searches fuse dense cosine hits with a BM25
-# lexical ranker via Reciprocal Rank Fusion, recovering exact technical-token
-# matches that embeddings blur. Set HYBRID_SEARCH=0 to fall back to the exact
-# dense-only behavior (the reversibility valve — nothing else changes).
-HYBRID_SEARCH         = os.getenv("HYBRID_SEARCH", "1").strip().lower() not in ("0", "false", "no", "off")
+# Fuse dense cosine hits with a BM25 lexical ranker via Reciprocal Rank Fusion,
+# recovering exact technical-token matches embeddings blur (AES_KEY_BASE64, MAXDOP,
+# error codes). This is a clear win for the DOCUMENTS corpus.
+#
+# It is deliberately NOT applied to the structured data-dictionary path: those
+# chunks are short per-column rows, so BM25 boosts near-tie sibling tables that
+# share generic tokens (e.g. "scan jobs status" pulls stg.ScanControl above the
+# correct dm_dq.scan_queue). That path already grounds via name-match / PRIMARY-
+# table pinning, which dense-only feeds correctly. Measured: enabling hybrid there
+# flipped 1/18 SQL questions to the wrong table. Opt in with HYBRID_STRUCTURED=1.
+HYBRID_SEARCH         = os.getenv("HYBRID_SEARCH", "1").strip().lower() not in ("0", "false", "no", "off")  # documents path
+HYBRID_STRUCTURED     = os.getenv("HYBRID_STRUCTURED", "0").strip().lower() not in ("0", "false", "no", "off")  # data-dictionary path (default OFF)
 HYBRID_CANDIDATE_POOL = int(os.getenv("HYBRID_CANDIDATE_POOL", "20"))  # per-ranker pool before fusion
 RRF_K                 = int(os.getenv("RRF_K", "60"))                  # RRF damping constant
 

@@ -503,10 +503,12 @@ def retrieve(
             FieldCondition(key="object_name", match=MatchValue(value=obj)),
         ]
 
-    # Hybrid only helps broad questions; a topic-anchored follow-up is already
-    # filtered to one table's columns, where lexical adds nothing. When hybrid is
-    # active we pull a larger candidate pool per ranker before fusing down to top_k.
-    hybrid = config.HYBRID_SEARCH and not topic_active
+    # Hybrid on the structured path is OFF by default: BM25 over short per-column
+    # dictionary rows boosts near-tie sibling tables and flips table grounding (see
+    # config.HYBRID_STRUCTURED). A topic-anchored follow-up is also already filtered
+    # to one table, where lexical adds nothing. When hybrid is active we pull a
+    # larger candidate pool per ranker before fusing down to top_k.
+    hybrid = config.HYBRID_SEARCH and config.HYBRID_STRUCTURED and not topic_active
     dense_limit = config.HYBRID_CANDIDATE_POOL if hybrid else top_k
 
     results = _qdrant_client.search(
