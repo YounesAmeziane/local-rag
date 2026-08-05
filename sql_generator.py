@@ -137,11 +137,13 @@ def get_schema_context(question: str, last_sql: str | None = None, clearance=Non
     `clearance` gates the Qdrant retrieval deny-by-default (audit #7).
     """
     import re as _re
-    from planner import is_catalog_question
+    from planner import is_catalog_question, is_description_audit_question
 
     # Fix A — DataDictionary catalog questions have one authoritative table.
     # Pin its verified schema and skip vector search, which mis-retrieves here.
-    if is_catalog_question(question):
+    # Description-audit questions (which tables/columns lack descriptions, how
+    # complete per schema) are also catalog questions answered against this table.
+    if is_catalog_question(question) or is_description_audit_question(question):
         return _DATADICTIONARY_SCHEMA, []
 
     _FOLLOWUP = _re.compile(

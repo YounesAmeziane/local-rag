@@ -131,6 +131,14 @@ def route(question: str, last_route: str | None = None) -> str:
     a message that (a) the LLM already called 'general' AND (b) leans on a pronoun with
     no standalone subject — so greetings/meta (no pronoun) are untouched.
     """
+    # Deterministic pre-check (before the LLM, so it can't shift other classifications):
+    # catalog-wide "which tables/columns are missing descriptions / how complete" questions
+    # need live SQL against rpt.DataDictionary — the description-less rows aren't in the
+    # vector store, so the structured RAG path literally can't answer them.
+    from planner import is_description_audit_question
+    if is_description_audit_question(question):
+        return "sql"
+
     try:
         resp = _client.chat(
             model=config.ROUTER_MODEL,

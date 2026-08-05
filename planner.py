@@ -167,6 +167,39 @@ def is_catalog_question(question: str) -> bool:
     return bool(_DATA_DICTIONARY_RE.search(question))
 
 
+# Description-completeness / "what's missing a description" questions. These ask
+# about the CURRENT state of the catalog (which rows lack descriptions, how complete
+# each schema is) — live data, answerable only via SQL against rpt.DataDictionary,
+# NOT from the vector store (ingest excludes description-less rows). A question about
+# ONE named object's description ("what is the description of mdm.Assets") is NOT this.
+_DESC_MISSING_RE = re.compile(
+    r"(missing|lacking|without|incomplete|complete(?:ness)?|coverage|populated|"
+    r"do(?:esn'?t| not|n'?t) have|have no|has no|no)\b.{0,40}\bdescriptions?\b"
+    r"|\bdescriptions?\b.{0,40}(missing|lacking|incomplete|complete(?:ness)?|coverage|populated)",
+    re.IGNORECASE,
+)
+_AGGREGATE_SCOPE_RE = re.compile(
+    r"\b(tables?|columns?|fields?|objects?|schemas?|dictionary|repository|each|all|every)\b",
+    re.IGNORECASE,
+)
+_SCHEMA_TABLE_RE = re.compile(r"\b[a-zA-Z_]\w*\.\[?[a-zA-Z_]\w*\]?\b")
+
+
+def is_description_audit_question(question: str) -> bool:
+    """True if the question asks, catalog-wide, which tables/columns are missing
+    descriptions or how complete descriptions are. Requires a missing/completeness
+    cue next to 'description(s)' AND aggregate scope (tables/columns/schema/each/all),
+    AND no specific schema.table named (that would be a single-object lookup answered
+    from the store, not a catalog audit). Routes to SQL against rpt.DataDictionary."""
+    if not _DESC_MISSING_RE.search(question):
+        return False
+    if not _AGGREGATE_SCOPE_RE.search(question):
+        return False
+    if _SCHEMA_TABLE_RE.search(question):
+        return False
+    return True
+
+
 def resolve_scope(question: str) -> tuple[str, str | None]:
     """Decide how to answer a SQL question.
 
