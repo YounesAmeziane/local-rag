@@ -197,6 +197,13 @@ def format_all_columns_context(payloads: list[dict]) -> str:
 # count. This is the schema-level sibling of fetch_all_columns.
 
 _TABLES_INTENT_RE = re.compile(r"\btables?\b", re.IGNORECASE)
+# "which/what table(s) does X" asks the model to IDENTIFY a table (the answer is a
+# table name), as opposed to "what columns/fields does <table> have" (the answer is
+# a column list). The head noun immediately after what/which is the discriminator:
+# "table(s)" => discovery, "column(s)/field(s)" => column listing. Kept tight (table
+# right after what/which) so it never matches a column question that merely mentions
+# a table elsewhere, e.g. "what columns does the scan_queue table have".
+_TABLE_DISCOVERY_RE = re.compile(r"\b(what|which)\s+tables?\b", re.IGNORECASE)
 # The "<word> schema" alternative excludes common articles/prepositions so that
 # "in schema sec" doesn't capture "in" (from "in schema") ahead of "sec" (from
 # "schema sec"); leftmost-match would otherwise grab the wrong token.
@@ -281,6 +288,60 @@ def format_all_tables_context(schema: str, tables: list[dict]) -> str:
     ]
     for t in tables:
         lines.append(f"{t['object_name']:<40} {t.get('object_description', '')}")
+    return "\n".join(lines)
+
+
+# ── Whole-catalog listing for theme/group discovery ──────────────────────────
+#
+# "Which tables support X" asks for a GROUP of thematically-related tables. Top-k
+# column-chunk vector search answers this partially — it surfaces the obvious table
+# and misses siblings whose columns don't individually match the theme (e.g. found
+# AuditEvents but missed AccessRequests/ErrorLog for "audit evidence"). With a small
+# catalog, the robust fix is complete recall: hand the model EVERY table + description
+# and let it filter by theme. (At thousands of tables, switch to a table-level index.)
+
+def all_tables_catalog(clearance=None) -> list[dict]:
+    """Every table in the Data Dictionary as {schema, object_name, object_description},
+    sorted. One scroll. For theme/group discovery where complete recall matters."""
+    seen: dict[tuple[str, str], str] = {}
+    offset = None
+    while True:
+        points, offset = _qdrant_client.scroll(
+            collection_name=config.COLLECTION_NAME,
+            scroll_filter=Filter(must=[_clearance_condition(clearance)]),
+            limit=500, offset=offset,
+            with_payload=["schema_name", "object_name", "object_description"],
+            with_vectors=False,
+        )
+        for p in points:
+            s = p.payload.get("schema_name")
+            o = p.payload.get("object_name")
+            if s and o:
+                seen.setdefault((s, o), p.payload.get("object_description", ""))
+        if offset is None:
+            break
+    return [
+        {"schema": s, "object_name": o, "object_description": d}
+        for (s, o), d in sorted(seen.items())
+    ]
+
+
+def format_catalog_context(catalog: list[dict]) -> str:
+    """Renders the complete table catalog (schema.table — description) for the LLM to
+    filter by theme."""
+    if not catalog:
+        return "No tables found."
+    lines = [
+        f"Complete list of all {len(catalog)} tables in the MetadataRepository "
+        f"Data Dictionary (schema.table — description). This is the FULL set of tables. "
+        f"To answer 'which tables ...' select EVERY table whose described purpose belongs "
+        f"to the functional area the question asks about — include a table when its "
+        f"description shows it is part of that area, even if the description does not "
+        f"repeat the exact words in the question. Do not restrict to a single table.",
+        "",
+    ]
+    for t in catalog:
+        lines.append(f"{t['schema']}.{t['object_name']} — {t.get('object_description', '')}")
     return "\n".join(lines)
 
 

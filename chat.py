@@ -236,6 +236,14 @@ def ask(
             and last_intent == "list_columns"
             and not retriever._COLUMN_PATTERN.search(question)
         )
+        # A "which/what table(s) …" question asks to IDENTIFY a table, not to list a
+        # table's columns — even when column vocabulary ("fields") appears as the thing
+        # the table relates to, e.g. "what table maps glossary terms to assets or
+        # fields". Without this, the stray "fields"/"columns" token sets want_full_columns
+        # and, with no topic_table to fetch, starves the question into partial vector
+        # search that misses the answer. Steer these to theme discovery instead.
+        if retriever._TABLE_DISCOVERY_RE.search(question):
+            want_full_columns = False
         # Comparison / multi-table questions name 2+ tables ("difference between
         # mdm.Assets and mdm.Columns"). Give the model the FULL schema of each named
         # table, instead of the topic_table filter starving all but the first-named
@@ -271,6 +279,18 @@ def ask(
             rewritten_query = f"[full-table fetch] {topic_table}"
             structured_results = []
             last_intent = "list_columns"
+        elif retriever._TABLES_INTENT_RE.search(question) and not want_full_columns:
+            # Theme/group discovery ("which tables support X"): reached only when it's
+            # a 'tables' question that is NOT a specific-schema listing (tables_hit) and
+            # NOT a 2-table comparison (multi_blocks) and NOT a column listing. Give the
+            # model the complete table catalog to filter by theme, so it can't miss a
+            # relevant table the way partial vector search did (found AuditEvents but
+            # not AccessRequests/ErrorLog for "audit evidence").
+            catalog = retriever.all_tables_catalog(clearance=clearance)
+            structured_context = retriever.format_catalog_context(catalog)
+            rewritten_query = "[full catalog]"
+            structured_results = []
+            last_intent = None
         else:
             structured_results, rewritten_query = retriever.retrieve(
                 question, last_useful_reply, topic_table, clearance=clearance
