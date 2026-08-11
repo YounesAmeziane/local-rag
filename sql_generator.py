@@ -61,6 +61,14 @@ STRICT RULES:
   X") write SELECT <group column>, COUNT(*) ... GROUP BY <group column> (group
   column FIRST); otherwise return a single COUNT(*) or SUM(...).
   "how many of those failed" -> SELECT COUNT(*) ... WHERE <failed condition>.
+- CATEGORY BREAKDOWN: when the question asks which/what records match a condition AND
+  what category/type they are (e.g. "which assets have no description and what types
+  are they"), return the breakdown by that category: SELECT <category>, COUNT(*) ...
+  GROUP BY <category> — not a raw row dump.
+- RATIO/PERCENTAGE: any proportion, percentage, ratio, or "how complete / what
+  coverage" figure MUST cast to float to avoid integer division — e.g. SELECT 100.0
+  * SUM(CASE WHEN <condition> THEN 1 ELSE 0 END) / COUNT(*) AS Pct FROM <X>. Never
+  write integer SUM(...)/COUNT(*) (it truncates to 0).
 - TOP 100: add it ONLY when returning raw rows with no aggregation.
   NEVER add TOP when the query contains COUNT, SUM, AVG, MIN, MAX, or GROUP BY.
   Aggregates produce their own natural result set — TOP would be wrong there.
@@ -273,7 +281,14 @@ def get_schema_context(question: str, last_sql: str | None = None, clearance=Non
         n = _re.sub(r"[^a-z0-9]", "", tbl.lower())
         if not n:
             return False
-        return n in q_norm or (n.endswith("s") and n[:-1] in q_norm)
+        forms = {n}
+        if n.endswith("ies"):
+            forms.add(n[:-3] + "y")
+        if n.endswith("es") and n[:-2] and n[:-2][-1] in "sxzh":  # batches->batch, processes->process
+            forms.add(n[:-2])
+        if n.endswith("s"):
+            forms.add(n[:-1])
+        return any(f in q_norm for f in forms)
 
     def _cols_full(meta: dict) -> list[dict]:
         full = retriever.fetch_all_columns(meta["schema"], meta["table"], clearance=clearance)
