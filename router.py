@@ -57,6 +57,14 @@ lookup, never a live query. This applies even when phrased as "how many" (e.g. "
 columns does X have"). Contrast with asking how many ROWS a table has, or any question
 about the table's actual data/values — that IS "sql", since it needs a live query against
 real data, not schema metadata. "Columns" = structured. "Rows"/"records"/actual data = sql.
+EXCEPTION: aggregating across many columns by a DATA attribute — "how many" or "what
+percentage of columns have an owner, are classified as PII, or lack a description" —
+needs a live COUNT over real values and is "sql", not a single-table schema lookup.
+
+Governance-entity DATA questions are "sql": listing/counting systems, assets, rules,
+scan batches, or lineage records; which systems/assets have or lack something (lineage,
+ownership, descriptions); what rules exist for a given column; and any percentage/
+coverage/completeness figure over the repository. These read live rows, not the schema.
 
 Output ONLY the label — one word, lowercase, no punctuation, no explanation.
 """
@@ -82,6 +90,13 @@ Q: What are the most recently scanned targets? → sql
 Q: Show me all rules that are currently inactive → sql
 Q: How many rule targets exist per asset? → sql
 Q: What is the total number of columns across all tables? → sql
+Q: List the inventory of all systems and how many are there → sql
+Q: Which systems are owned by People Analytics? → sql
+Q: Which systems have incomplete lineage? → sql
+Q: What percentage of columns have an owner? → sql
+Q: What percentage of assets have a description? → sql
+Q: What DQ rules exist for the EmployeeStatus column? → sql
+Q: How complete is the metadata repository? → sql
 Q: What is the API Engine and what problem does it solve? → unstructured
 Q: What is the Workflow Engine and what does it execute? → unstructured
 Q: What stored procedure does a worker thread call to get its next task? → unstructured
@@ -189,7 +204,8 @@ def decompose_question(question: str) -> list[str] | None:
     """Return 2+ independent sub-questions for genuine multi-intent, else None.
     Gated: LLM split runs only when a conjunction AND an aggregate cue are present,
     so pure-docs 'and' questions and 'show me X and Y' never reach it."""
-    if not (_CONJUNCTION_RE.search(question) and _AGG_CUE_RE.search(question)):
+    multipart = bool(_CONJUNCTION_RE.search(question)) or question.count("?") >= 2
+    if not (multipart and _AGG_CUE_RE.search(question)):
         return None
     try:
         resp = _client.chat(
