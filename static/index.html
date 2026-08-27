@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FHA Data Governance Assistant</title>
+<style>
+  :root{
+    --navy:#1e4474; --blue:#005293; --orange:#e35205;
+    --bg:#f4f6f9; --panel:#ffffff; --line:#dde3ea;
+    --ink:#1c2530; --muted:#5d6b7a;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:"Cascadia Code",Consolas,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;font-family:var(--font);background:var(--bg);color:var(--ink);
+       display:flex;flex-direction:column}
+
+  header{background:var(--navy);color:#fff;padding:.7rem 1.1rem;
+         display:flex;align-items:center;gap:.9rem;flex-wrap:wrap}
+  header .mark{width:8px;height:26px;background:var(--orange);border-radius:2px}
+  header h1{font-size:1rem;margin:0;font-weight:600;letter-spacing:.2px}
+  header .spacer{flex:1}
+  header label{font-size:.75rem;color:#c7d4e4;margin-right:.35rem}
+  select,#reset{font:inherit;font-size:.8rem;border-radius:6px;border:1px solid #3b5d8f;
+         background:#16345b;color:#fff;padding:.3rem .5rem;cursor:pointer}
+  select:focus,#reset:focus{outline:2px solid var(--orange);outline-offset:1px}
+  #reset:hover{background:#1d4272}
+  #status{font-size:.72rem;color:#c7d4e4;display:flex;align-items:center;gap:.35rem}
+  #dot{width:8px;height:8px;border-radius:50%;background:#6bbf59}
+  #dot.off{background:#d9534f}
+
+  main{flex:1;overflow-y:auto;padding:1.1rem;display:flex;flex-direction:column;gap:.85rem}
+  .wrap{width:100%;max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:.85rem}
+
+  .msg{display:flex;flex-direction:column;gap:.3rem}
+  .who{font-size:.7rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .bubble{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+          padding:.7rem .9rem;line-height:1.55;overflow-wrap:anywhere}
+  .user .who{color:var(--orange)}
+  .user .bubble{border-left:3px solid var(--orange)}
+  .bot  .who{color:var(--blue)}
+  .bot  .bubble{border-left:3px solid var(--blue)}
+  .err .who{color:#b3261e}
+  .err .bubble{border-left:3px solid #b3261e;background:#fdf3f2}
+
+  /* markdown */
+  .bubble h1,.bubble h2,.bubble h3{margin:.7em 0 .35em;line-height:1.3;color:var(--navy)}
+  .bubble h1{font-size:1.15rem} .bubble h2{font-size:1.05rem} .bubble h3{font-size:.95rem}
+  .bubble p{margin:.45em 0}
+  .bubble ul,.bubble ol{margin:.45em 0;padding-left:1.35rem}
+  .bubble li{margin:.15em 0}
+  .bubble code{font-family:var(--mono);font-size:.86em;background:#eef1f5;
+        border:1px solid var(--line);border-radius:4px;padding:.05em .35em}
+  .bubble pre{background:#12263f;color:#e8eef6;border-radius:8px;padding:.7rem .85rem;
+        overflow-x:auto;margin:.55em 0}
+  .bubble pre code{background:none;border:0;color:inherit;padding:0;font-size:.85em}
+  .bubble blockquote{margin:.5em 0;padding:.1em .9rem;border-left:3px solid var(--line);color:var(--muted)}
+  .bubble table{border-collapse:collapse;margin:.55em 0;font-size:.88em;display:block;overflow-x:auto}
+  .bubble th,.bubble td{border:1px solid var(--line);padding:.35rem .55rem;text-align:left}
+  .bubble th{background:#eef2f7;color:var(--navy)}
+  .bubble a{color:var(--blue)}
+  .bubble>*:first-child{margin-top:0} .bubble>*:last-child{margin-bottom:0}
+
+  .meta{font-size:.7rem;color:var(--muted);display:flex;gap:.5rem;align-items:center}
+  .tag{background:#eef2f7;border:1px solid var(--line);border-radius:999px;padding:.05rem .5rem}
+  details.sql{margin-top:.35rem}
+  details.sql summary{cursor:pointer;font-size:.7rem;color:var(--blue)}
+  details.sql pre{margin:.35rem 0 0}
+
+  #working{display:none;align-items:center;gap:.55rem;color:var(--orange);
+           font-size:.82rem;font-weight:600}
+  #working.on{display:flex}
+  #working .pulse{width:9px;height:9px;border-radius:50%;background:var(--orange);
+           animation:pulse 1.1s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}
+
+  footer{border-top:1px solid var(--line);background:var(--panel);padding:.75rem 1.1rem}
+  .bar{width:100%;max-width:900px;margin:0 auto;display:flex;gap:.6rem}
+  #q{flex:1;font:inherit;padding:.65rem .8rem;border:1px solid var(--line);
+     border-radius:8px;resize:none;max-height:150px;min-height:44px}
+  #q:focus{outline:2px solid var(--blue);outline-offset:0;border-color:var(--blue)}
+  #send{font:inherit;font-weight:600;color:#fff;background:var(--orange);border:0;
+        border-radius:8px;padding:0 1.15rem;cursor:pointer}
+  #send:hover{background:#c94904}
+  #send:disabled{background:#c2c9d2;cursor:not-allowed}
+  .hint{max-width:900px;margin:.4rem auto 0;font-size:.68rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <div class="mark"></div>
+  <h1>FHA Data Governance Assistant</h1>
+  <div class="spacer"></div>
+  <div id="status"><span id="dot"></span><span id="model">…</span></div>
+  <div><label for="effort">Thinking</label><select id="effort"></select></div>
+  <button id="reset" title="Clear the conversation">Reset</button>
+</header>
+
+<main id="log"><div class="wrap" id="wrap">
+  <div class="msg bot">
+    <div class="who">Assistant</div>
+    <div class="bubble">Ask about tables, columns, schemas, or live data in the
+      MetadataRepository — or about the internal technical documentation.</div>
+  </div>
+</div></main>
+
+<footer>
+  <div class="bar">
+    <textarea id="q" rows="1" placeholder="Ask a question…  (Enter to send, Shift+Enter for a new line)"></textarea>
+    <button id="send">Send</button>
+  </div>
+  <div class="hint">Read-only. Answers come from the Data Dictionary, live SQL, and internal docs.</div>
+</footer>
+
+<script>
+const wrap=document.getElementById('wrap'), log=document.getElementById('log');
+const qEl=document.getElementById('q'), sendEl=document.getElementById('send');
+const effortEl=document.getElementById('effort'), resetEl=document.getElementById('reset');
+const dot=document.getElementById('dot'), modelEl=document.getElementById('model');
+let busy=false, timer=null;
+
+/* ---------- minimal markdown -> html (input is escaped first) ---------- */
+function esc(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function inline(s){
+  return s
+    .replace(/`([^`]+)`/g,(m,c)=>`<code>${c}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g,'$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+function md(src){
+  const blocks=[]; let t=esc(src);
+  t=t.replace(/```(\w+)?\n?([\s\S]*?)```/g,(m,lang,code)=>{
+    blocks.push(`<pre><code>${code.replace(/\n$/,'')}</code></pre>`); return `[[CB${blocks.length-1}]]`;});
+  const out=[]; const lines=t.split('\n');
+  let list=null, para=[], quote=[];
+  const flushP=()=>{if(para.length){out.push(`<p>${inline(para.join(' '))}</p>`);para=[];}};
+  const flushL=()=>{if(list){out.push(`</${list}>`);list=null;}};
+  const flushQ=()=>{if(quote.length){out.push(`<blockquote>${inline(quote.join(' '))}</blockquote>`);quote=[];}};
+  const flushAll=()=>{flushP();flushL();flushQ();};
+  for(let i=0;i<lines.length;i++){
+    const ln=lines[i], s=ln.trim();
+    if(!s){flushAll();continue;}
+    if(/^\[\[CB\d+\]\]$/.test(s)){flushAll();out.push(s);continue;}
+    let m;
+    if((m=s.match(/^(#{1,6})\s+(.*)$/))){flushAll();const n=Math.min(m[1].length,3);out.push(`<h${n}>${inline(m[2])}</h${n}>`);continue;}
+    if(/^(---|\*\*\*|___)$/.test(s)){flushAll();out.push('<hr>');continue;}
+    if((m=s.match(/^&gt;\s?(.*)$/))){flushP();flushL();quote.push(m[1]);continue;}
+    /* table: header row followed by a |---| separator */
+    if(s.startsWith('|') && i+1<lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i+1])){
+      flushAll();
+      const cells=r=>r.trim().replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+      const head=cells(s); i++; const rows=[];
+      while(i+1<lines.length && lines[i+1].trim().startsWith('|')){rows.push(cells(lines[++i]));}
+      out.push(`<table><thead><tr>${head.map(h=>`<th>${inline(h)}</th>`).join('')}</tr></thead><tbody>`
+        + rows.map(r=>`<tr>${r.map(c=>`<td>${inline(c)}</td>`).join('')}</tr>`).join('') + `</tbody></table>`);
+      continue;
+    }
+    if((m=s.match(/^[-*+]\s+(.*)$/))){flushP();flushQ();if(list!=='ul'){flushL();out.push('<ul>');list='ul';}
+      out.push(`<li>${inline(m[1])}</li>`);continue;}
+    if((m=s.match(/^\d+[.)]\s+(.*)$/))){flushP();flushQ();if(list!=='ol'){flushL();out.push('<ol>');list='ol';}
+      out.push(`<li>${inline(m[1])}</li>`);continue;}
+    flushL();flushQ();para.push(s);
+  }
+  flushAll();
+  return out.join('\n').replace(/\[\[CB(\d+)\]\]/g,(m,i)=>blocks[+i]);
+}
+
+/* ---------- ui ---------- */
+function bubble(kind,who){
+  const d=document.createElement('div'); d.className='msg '+kind;
+  d.innerHTML=`<div class="who">${who}</div><div class="bubble"></div>`;
+  wrap.appendChild(d); scroll();
+  return d.querySelector('.bubble');
+}
+function scroll(){log.scrollTop=log.scrollHeight;}
+
+const working=document.createElement('div');
+working.id='working'; working.innerHTML='<span class="pulse"></span><span id="wtext">working…</span>';
+function startWork(){
+  wrap.appendChild(working); working.classList.add('on');
+  const t0=Date.now();
+  const tick=()=>{const s=Math.floor((Date.now()-t0)/1000);
+    document.getElementById('wtext').textContent=`working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;};
+  tick(); timer=setInterval(tick,1000); scroll();
+}
+function stopWork(){clearInterval(timer);working.classList.remove('on');working.remove();}
+
+async function ask(){
+  const question=qEl.value.trim();
+  if(!question||busy) return;
+  busy=true; sendEl.disabled=true; qEl.value=''; qEl.style.height='auto';
+  bubble('user','You').textContent=question;
+  startWork();
+
+  let target=null, raw='';
+  const finish=(html)=>{ if(!target) target=bubble('bot','Assistant'); target.innerHTML=html; scroll(); };
+  try{
+    const res=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question})});
+    const reader=res.body.getReader(), dec=new TextDecoder();
+    let buf='';
+    while(true){
+      const {value,done}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      const parts=buf.split('\n\n'); buf=parts.pop();
+      for(const p of parts){
+        const line=p.split('\n').find(l=>l.startsWith('data:')); if(!line) continue;
+        const ev=JSON.parse(line.slice(5).trim());
+        if(ev.type==='token'){
+          if(!target){stopWork(); target=bubble('bot','Assistant');}
+          raw+=ev.text; target.innerHTML=md(raw); scroll();
+        }else if(ev.type==='done'){
+          stopWork();
+          finish(md(ev.answer||raw));
+          const meta=document.createElement('div'); meta.className='meta';
+          meta.innerHTML=`<span class="tag">${ev.route}</span>`;
+          if(ev.sql){
+            const d=document.createElement('details'); d.className='sql';
+            d.innerHTML=`<summary>view SQL</summary><pre><code>${esc(ev.sql)}</code></pre>`;
+            target.parentElement.appendChild(d);
+          }
+          target.parentElement.appendChild(meta); scroll();
+        }else if(ev.type==='error'){
+          stopWork(); bubble('err','Error').textContent=ev.message;
+        }
+      }
+    }
+  }catch(e){ stopWork(); bubble('err','Error').textContent=String(e); }
+  stopWork(); busy=false; sendEl.disabled=false; qEl.focus();
+}
+
+sendEl.onclick=ask;
+qEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();ask();}});
+qEl.addEventListener('input',()=>{qEl.style.height='auto';qEl.style.height=Math.min(qEl.scrollHeight,150)+'px';});
+effortEl.onchange=()=>fetch('/effort',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({effort:effortEl.value})});
+resetEl.onclick=async()=>{await fetch('/reset',{method:'POST'});
+  wrap.innerHTML=''; bubble('bot','Assistant').textContent='Conversation cleared.';};
+
+fetch('/state').then(r=>r.json()).then(s=>{
+  modelEl.textContent=s.model; dot.className=s.online?'':'off';
+  effortEl.innerHTML=s.efforts.map(e=>`<option${e===s.effort?' selected':''}>${e}</option>`).join('');
+});
+qEl.focus();
+</script>
+</body>
+</html>
