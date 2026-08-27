@@ -10,11 +10,11 @@
 
 import re
 from dataclasses import dataclass
-import ollama
 from qdrant_client import QdrantClient
 from qdrant_client.models import ScoredPoint, Filter, FieldCondition, MatchValue, MatchAny
 import config
 import lexical
+import llm
 
 
 # ── Access control (audit #7) ─────────────────────────────────────────────────
@@ -27,7 +27,6 @@ def _clearance_condition(clearance) -> FieldCondition:
     allowed = list(clearance) if clearance else list(config.DEFAULT_CLEARANCE)
     return FieldCondition(key="clearance", match=MatchAny(any=allowed))
 
-_ollama_client = ollama.Client(host=config.OLLAMA_HOST)
 _qdrant_client = QdrantClient(
     host=config.QDRANT_HOST, port=config.QDRANT_PORT,
     grpc_port=config.QDRANT_GRPC_PORT, prefer_grpc=True,
@@ -471,8 +470,7 @@ def rewrite_query(
 # ── Embedding ─────────────────────────────────────────────────────────────────
 
 def embed_query(query: str) -> list[float]:
-    resp = _ollama_client.embeddings(model=config.EMBED_MODEL, prompt=query)
-    return resp["embedding"]
+    return llm.embed(query)
 
 
 # ── Semantic search ───────────────────────────────────────────────────────────

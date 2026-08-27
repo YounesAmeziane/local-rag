@@ -14,13 +14,11 @@ import re
 from pathlib import Path
 
 import pyodbc
-import ollama
 from qdrant_client.models import ScoredPoint
 
 import config
 import retriever
-
-_ollama = ollama.Client(host=config.OLLAMA_HOST)
+import llm
 
 # Module logger -> logs/sql_generator.log (mirrors planner.py). Operational notices
 # like the read-only-login warning go here, NOT to the console — printing them to
@@ -249,6 +247,7 @@ def get_schema_context(question: str, last_sql: str | None = None, clearance=Non
     if not results:
         return "", results
 
+
     grouped: dict[tuple, dict] = {}
     order: list[tuple] = []
     for hit in results:
@@ -358,15 +357,13 @@ def generate_sql(question: str, schema_context: str, last_sql: str | None = None
     Calls the LLM to generate a T-SQL SELECT query.
     Returns the raw SQL string or 'INSUFFICIENT_SCHEMA'.
     """
-    resp = _ollama.chat(
-        model=config.CHAT_MODEL,
-        messages=[
+    sql = llm.reason(
+        [
             {"role": "system", "content": _SQL_SYSTEM},
             {"role": "user",   "content": _build_sql_prompt(question, schema_context, last_sql)},
         ],
-        options={"temperature": 0},
+        temperature=0,
     )
-    sql = resp["message"]["content"].strip()
 
     # Strip markdown fences if the model adds them despite instructions
     sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.IGNORECASE)
@@ -379,9 +376,8 @@ def repair_sql(question: str, schema_context: str, bad_sql: str, error: str) -> 
     error back to the model for a single corrected attempt. Catches malformed
     aggregates (ORDER BY COUNT() without GROUP BY), alias-binding errors, and
     similar syntax faults that survive generation. Returns the corrected SQL."""
-    resp = _ollama.chat(
-        model=config.CHAT_MODEL,
-        messages=[
+    sql = llm.reason(
+        [
             {"role": "system", "content": _SQL_SYSTEM},
             {"role": "user", "content": (
                 f"Schema context from Data Dictionary:\n\n{schema_context}\n\n---\n\n"
@@ -392,9 +388,8 @@ def repair_sql(question: str, schema_context: str, bad_sql: str, error: str) -> 
                 f"SQL Server error:\n{error}"
             )},
         ],
-        options={"temperature": 0},
+        temperature=0,
     )
-    sql = resp["message"]["content"].strip()
     sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.IGNORECASE)
     sql = re.sub(r"\s*```$", "", sql)
     return sql.strip()
@@ -425,9 +420,8 @@ def repair_missing_order_by(question: str, schema_context: str, sql: str) -> str
     """Q6 guard repair. The query uses TOP N to answer a superlative question but has
     no ORDER BY, so its rows are arbitrary. Ask the model to add the correct ORDER BY
     (column + direction), changing nothing else. Returns the corrected SQL."""
-    resp = _ollama.chat(
-        model=config.CHAT_MODEL,
-        messages=[
+    out = llm.reason(
+        [
             {"role": "system", "content": _SQL_SYSTEM},
             {"role": "user", "content": (
                 f"Schema context from Data Dictionary:\n\n{schema_context}\n\n---\n\n"
@@ -440,9 +434,8 @@ def repair_missing_order_by(question: str, schema_context: str, sql: str) -> str
                 f"Question: {question}\n\nQuery:\n{sql}"
             )},
         ],
-        options={"temperature": 0},
+        temperature=0,
     )
-    out = resp["message"]["content"].strip()
     out = re.sub(r"^```(?:sql)?\s*", "", out, flags=re.IGNORECASE)
     out = re.sub(r"\s*```$", "", out)
     return out.strip()
@@ -625,19 +618,16 @@ def generate_answer(question: str, results_context: str) -> str:
     """
     Generates a natural language answer from the SQL results.
     """
-    resp = _ollama.chat(
-        model=config.CHAT_MODEL,
-        messages=[
+    return llm.reason(
+        [
             {"role": "system", "content": _ANSWER_SYSTEM},
             {"role": "user", "content": (
                 f"Question: {question}\n\n"
                 f"Results:\n{results_context}"
             )},
         ],
-        options={"temperature": 0.1},
-        stream=False,
+        temperature=0.1,
     )
-    return resp["message"]["content"].strip()
 
 
 # ── Full SQL pipeline ─────────────────────────────────────────────────────────

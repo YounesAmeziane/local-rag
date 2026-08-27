@@ -1,8 +1,5 @@
 import re
-import ollama
-import config
-
-_client = ollama.Client(host=config.OLLAMA_HOST)
+import llm
 
 _ROUTER_SYSTEM = """\
 You are a query router for a data governance assistant at Fraser Health Authority.
@@ -155,15 +152,14 @@ def route(question: str, last_route: str | None = None) -> str:
         return "sql"
 
     try:
-        resp = _client.chat(
-            model=config.ROUTER_MODEL,
-            messages=[
+        out = llm.reason(
+            [
                 {"role": "system", "content": _ROUTER_SYSTEM + _EXAMPLES},
                 {"role": "user",   "content": f"Q: {question}"},
             ],
-            options={"temperature": 0, "num_predict": 10},
+            temperature=0, max_tokens=16, effort="low",  # one-word label: never think
         )
-        label = resp["message"]["content"].strip().lower().split()[0]
+        label = out.strip().lower().split()[0]
         if label not in ("structured", "unstructured", "both", "general", "sql"):
             label = "both"
     except Exception:

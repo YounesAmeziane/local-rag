@@ -13,7 +13,6 @@ import argparse
 import uuid
 from pathlib import Path
 
-import ollama
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from rich.console import Console
@@ -21,11 +20,11 @@ from rich.progress import track
 
 import config
 import doc_registry as registry
+import llm
 from chunker import chunk_file
 
 console = Console()
 _qdrant  = QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT)
-_ollama  = ollama.Client(host=config.OLLAMA_HOST)
 
 
 # ── Qdrant collection setup ───────────────────────────────────────────────────
@@ -52,8 +51,7 @@ def ensure_collection() -> None:
 # ── Embedding ─────────────────────────────────────────────────────────────────
 
 def embed(text: str) -> list[float]:
-    resp = _ollama.embeddings(model=config.EMBED_MODEL, prompt=text)
-    return resp["embedding"]
+    return llm.embed(text)
 
 
 # ── Ingest one file ───────────────────────────────────────────────────────────

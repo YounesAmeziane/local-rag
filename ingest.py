@@ -9,12 +9,12 @@ import sys
 
 import pyodbc
 import pandas as pd
-import ollama
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from rich.console import Console
 from rich.progress import track
 import config
+import llm
 
 # Windows consoles default to cp1252, which can't encode the ✓/✗ status glyphs this
 # script prints -- forcing UTF-8 stops a run from dying on the success message.
@@ -105,12 +105,7 @@ def build_chunks(df: pd.DataFrame) -> list[dict]:
 # ── 3. Embed with Ollama ──────────────────────────────────────────────────────
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    client = ollama.Client(host=config.OLLAMA_HOST)
-    vectors = []
-    for text in track(texts, description="Embedding chunks..."):
-        resp = client.embeddings(model=config.EMBED_MODEL, prompt=text)
-        vectors.append(resp["embedding"])
-    return vectors
+    return [llm.embed(t) for t in track(texts, description="Embedding chunks...")]
 
 
 # ── 4. Upsert into Qdrant ────────────────────────────────────────────────────

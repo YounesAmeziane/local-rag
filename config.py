@@ -31,11 +31,30 @@ COLLECTION_NAME       = "data_dictionary"
 DOCS_COLLECTION_NAME  = "documents"
 VECTOR_SIZE           = 768
 
-# ── Ollama ────────────────────────────────────────────────────────────────────
+# ── Models ────────────────────────────────────────────────────────────────────
+# Chat/reasoning: any OpenAI-compatible server on localhost (LM Studio default
+# port 1234; Ollama exposes /v1 on 11434; vLLM on the server).
+REASON_BASE_URL       = os.getenv("REASON_BASE_URL", "http://127.0.0.1:1234/v1")
+REASON_MODEL          = os.getenv("REASON_MODEL", "qwen/qwen3.8-27b")
+REASON_TIMEOUT        = float(os.getenv("REASON_TIMEOUT", "600"))
+
+# Qwen3.8 thinking depth, chosen per session at startup.
+# Reasoning tokens count against max_tokens, so a small cap can be consumed
+# entirely by thinking and return empty content. llm.py adds this headroom.
+REASONING_HEADROOM    = int(os.getenv("REASONING_HEADROOM", "1024"))
+REASONING_EFFORTS     = ("low", "medium", "xhigh")
+REASONING_EFFORT      = os.getenv("REASONING_EFFORT", "low").strip().lower()
+if REASONING_EFFORT not in REASONING_EFFORTS:
+    REASONING_EFFORT = "low"
+
+# Embeddings stay on Ollama+nomic: identical vectors, so the existing Qdrant
+# collections stay valid (switching would force a full re-ingest).
 EMBED_MODEL           = "nomic-embed-text"
-CHAT_MODEL            = "llama3.1:8b"
-ROUTER_MODEL          = "llama3.1:8b"
 OLLAMA_HOST           = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+# Back-compat aliases (test suites and older call sites read these).
+CHAT_MODEL            = REASON_MODEL
+ROUTER_MODEL          = REASON_MODEL
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 TOP_K                 = 5

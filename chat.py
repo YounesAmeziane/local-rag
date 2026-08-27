@@ -4,12 +4,13 @@
 #   /help     — show commands
 #   /quit     — exit
 
-import ollama
+import os
 from rich.console import Console
 import retriever
 import router
 import sql_generator
 import config
+import llm
 
 console = Console()
 
@@ -114,6 +115,7 @@ def ask(
     last_intent: str | None = None,
     last_route: str | None = None,
     clearance=None,
+    on_token=None,
 ) -> tuple[str, str | None, str, str | None, str | None]:
     """
     Full RAG pipeline for one turn.
@@ -170,21 +172,15 @@ def ask(
         history.append({"role": "user", "content": question})
         messages = [{"role": "system", "content": GENERAL_SYSTEM_PROMPT}] + history
 
-        client = ollama.Client(host=config.OLLAMA_HOST)
-        response = client.chat(
-            model=config.CHAT_MODEL,
-            messages=messages,
-            stream=True,
-            options={"temperature": 0.5},
-        )
-
         console.print()
         console.print("[bold green]Assistant[/bold green]")
         full_response = ""
-        for chunk in response:
-            token = chunk["message"]["content"]
+        for token in llm.reason_stream(messages, temperature=0.5):
             full_response += token
-            print(token, end="", flush=True)
+            if on_token:
+                on_token(token)
+            else:
+                print(token, end="", flush=True)
         print()
 
         history.append({"role": "assistant", "content": full_response})
@@ -330,21 +326,15 @@ def ask(
     history.append({"role": "user", "content": user_message})
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
 
-    client = ollama.Client(host=config.OLLAMA_HOST)
-    response = client.chat(
-        model=config.CHAT_MODEL,
-        messages=messages,
-        stream=True,
-        options={"temperature": 0.1},
-    )
-
     console.print()
     console.print("[bold green]Assistant[/bold green]")
     full_response = ""
-    for chunk in response:
-        token = chunk["message"]["content"]
+    for token in llm.reason_stream(messages, temperature=0.1):
         full_response += token
-        print(token, end="", flush=True)
+        if on_token:
+            on_token(token)
+        else:
+            print(token, end="", flush=True)
     print()
 
     history.append({"role": "assistant", "content": full_response})
@@ -356,6 +346,7 @@ def ask(
 def print_help():
     console.print(
         "  [bold]/sources[/bold]  — show rewritten query + retrieved chunks for last question\n"
+        "  [bold]/effort[/bold]   — show or set reasoning effort (low | medium | xhigh)\n"
         "  [bold]/reset[/bold]    — clear conversation history\n"
         "  [bold]/help[/bold]     — show this message\n"
         "  [bold]/quit[/bold]     — exit\n",
@@ -363,8 +354,54 @@ def print_help():
     )
 
 
+def _choose_effort() -> str:
+    """Pick the session reasoning effort at startup. --effort/-e or REASONING_EFFORT
+    skip the prompt; otherwise ask, defaulting to the configured level."""
+    import sys
+    argv = sys.argv[1:]
+    for flag in ("--effort", "-e"):
+        if flag in argv:
+            i = argv.index(flag)
+            if i + 1 < len(argv):
+                try:
+                    return llm.set_reasoning_effort(argv[i + 1])
+                except ValueError as e:
+                    console.print(f"[red]{e}[/red]")
+    if os.getenv("REASONING_EFFORT"):
+        return llm.get_reasoning_effort()
+
+    default = llm.get_reasoning_effort()
+    opts = " / ".join(config.REASONING_EFFORTS)
+    try:
+        choice = console.input(
+            f"[bold]Reasoning effort[/bold] [dim]({opts})[/dim] [dim][{default}][/dim]: "
+        ).strip()
+    except (KeyboardInterrupt, EOFError):
+        return default
+    if not choice:
+        return default
+    try:
+        return llm.set_reasoning_effort(choice)
+    except ValueError as e:
+        console.print(f"[red]{e} — using '{default}'[/red]")
+        return default
+
+
 def main():
     console.rule("[bold cyan]DataDictionary RAG — Fraser Health Authority[/bold cyan]")
+
+    ok, detail = llm.health()
+    if not ok:
+        console.print(
+            f"[red]Chat model unreachable at {config.REASON_BASE_URL}[/red] [dim]({detail})[/dim]\n"
+            "[dim]Start the local server (LM Studio: Developer → Start Server), "
+            "or set REASON_BASE_URL.[/dim]\n"
+        )
+    else:
+        console.print(f"[dim]Model: {config.REASON_MODEL}  |  {config.REASON_BASE_URL}[/dim]")
+
+    effort = _choose_effort()
+    console.print(f"[dim]Reasoning effort: [bold]{effort}[/bold][/dim]\n")
     console.print("Ask questions about tables, columns, schemas, or data types.\n")
     print_help()
 
@@ -406,6 +443,19 @@ def main():
                     clearance=config.APP_CLEARANCE)
             else:
                 console.print("[dim]No previous question to show sources for.[/dim]")
+            continue
+
+        if user_input.lower().startswith("/effort"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) == 1:
+                console.print(f"[dim]Reasoning effort: [bold]{llm.get_reasoning_effort()}[/bold] "
+                              f"({' | '.join(config.REASONING_EFFORTS)})[/dim]\n")
+            else:
+                try:
+                    console.print(f"[dim]Reasoning effort set to "
+                                  f"[bold]{llm.set_reasoning_effort(parts[1])}[/bold][/dim]\n")
+                except ValueError as e:
+                    console.print(f"[red]{e}[/red]\n")
             continue
 
         if user_input.lower() == "/help":
