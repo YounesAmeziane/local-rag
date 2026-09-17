@@ -54,6 +54,11 @@ STRICT RULES:
   Do NOT JOIN tables unless the question explicitly requires combining data from
   more than one. Aggregation on that single table — GROUP BY, COUNT, SUM, AVG,
   TOP N — is expected wherever the question calls for it.
+- JOINS: when a table block lists "Joins (foreign keys)", those predicates are the
+  real relationships — use them verbatim when the question spans tables. Chain them
+  for multi-hop paths when no direct key exists (e.g. Systems -> Assets ->
+  LineageMappings). NEVER invent a join condition that is not listed; if the tables
+  you need cannot be connected by the listed keys, output INSUFFICIENT_SCHEMA.
 - COUNT QUESTIONS: a "how many", "how much", "number of", or "count of" question
   returns a count, not raw column values. If it groups ("per X" / "by X" / "each
   X") write SELECT <group column>, COUNT(*) ... GROUP BY <group column> (group
@@ -140,6 +145,50 @@ Table: [MetadataRepository].[rpt].[DataDictionary]
     - is_identity (bit, NOT NULL) — 1 if the tracked column is an identity column, else 0
     - ColumnDescription (nvarchar, NULL) — description of the tracked column (NULL if undocumented)
 """
+
+
+# ── Foreign keys ──────────────────────────────────────────────────────────────
+# Vector search surfaces columns, never relationships, so the generator had to
+# guess join keys from column names -- and multi-hop paths (Systems -> Assets ->
+# LineageMappings) were undiscoverable. Load the real FK graph once and render the
+# edges touching each table as ready-to-use join predicates.
+
+_FK_CACHE: dict | None = None
+
+_FK_QUERY = """
+SELECT ps.name AS pschema, pt.name AS ptable, pc.name AS pcol,
+       rs.name AS rschema, rt.name AS rtable, rc.name AS rcol
+FROM sys.foreign_key_columns fkc
+JOIN sys.objects pt ON pt.object_id = fkc.parent_object_id
+JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+JOIN sys.objects rt ON rt.object_id = fkc.referenced_object_id
+JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
+JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+"""
+
+
+def foreign_keys() -> dict:
+    """{(schema, table): ["a.b.col = c.d.col", ...]} -- every FK edge touching a
+    table, in both directions, phrased as a join predicate. Cached per process;
+    returns {} if the database is unreachable so schema context still renders."""
+    global _FK_CACHE
+    if _FK_CACHE is not None:
+        return _FK_CACHE
+    cache: dict = {}
+    try:
+        rows, _ = execute_sql(_FK_QUERY)
+    except Exception as e:
+        log.warning("foreign keys unavailable (%s) -- joins fall back to name matching", e)
+        _FK_CACHE = {}
+        return _FK_CACHE
+    for r in rows:
+        pred = (f"{r['pschema']}.{r['ptable']}.{r['pcol']}"
+                f" = {r['rschema']}.{r['rtable']}.{r['rcol']}")
+        cache.setdefault((r["pschema"], r["ptable"]), []).append(pred)
+        cache.setdefault((r["rschema"], r["rtable"]), []).append(pred)
+    _FK_CACHE = cache
+    return _FK_CACHE
 
 
 # ── Schema retrieval for SQL context ─────────────────────────────────────────
@@ -310,6 +359,11 @@ def get_schema_context(question: str, last_sql: str | None = None, clearance=Non
             lines.append(role)
         lines.append(f"Table: [{meta['database']}].[{meta['schema']}].[{meta['table']}]")
         lines.append(f"  Description: {meta['description']}")
+        fks = foreign_keys().get((meta["schema"], meta["table"]))
+        if fks:
+            lines.append("  Joins (foreign keys — use these exact conditions):")
+            for pred in sorted(set(fks)):
+                lines.append(f"    - {pred}")
         lines.append("  Columns:")
         for col in cols:
             nullable = "NULL" if col["nullable"] else "NOT NULL"

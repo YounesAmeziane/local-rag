@@ -60,6 +60,13 @@ ROUTER_MODEL          = REASON_MODEL
 TOP_K                 = 5
 DOCS_TOP_K            = 5
 
+# How many past messages (user+assistant entries) to replay into the prompt.
+# Retrieved context is NOT stored in history -- it is sent only for the turn it
+# was fetched for -- so this caps prompt growth without discarding continuity.
+# The Session/CLI keeps the full transcript regardless; this only bounds what is
+# re-sent each turn. 0 disables the cap.
+HISTORY_TURNS         = int(os.getenv("HISTORY_TURNS", "20"))
+
 # ── Hybrid lexical+dense retrieval (audit #6) ─────────────────────────────────
 # Fuse dense cosine hits with a BM25 lexical ranker via Reciprocal Rank Fusion,
 # recovering exact technical-token matches embeddings blur (AES_KEY_BASE64, MAXDOP,

@@ -57,6 +57,10 @@ test_sql_hard.py
 test_results/
 test_docs.py
 
+# notes
+CHATBOT_CAPABILITIES.md
+
+
 # Translations
 *.mo
 *.pot

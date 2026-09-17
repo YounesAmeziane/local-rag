@@ -170,7 +170,8 @@ def ask(
             console.print(f"[dim]Route: [bold]general[/bold] — no retrieval[/dim]")
 
         history.append({"role": "user", "content": question})
-        messages = [{"role": "system", "content": GENERAL_SYSTEM_PROMPT}] + history
+        recent = history[-config.HISTORY_TURNS:] if config.HISTORY_TURNS else history
+        messages = [{"role": "system", "content": GENERAL_SYSTEM_PROMPT}] + recent
 
         console.print()
         console.print("[bold green]Assistant[/bold green]")
@@ -322,9 +323,13 @@ def ask(
             console.print(retriever.format_docs_context_debug(doc_results), style="dim")
         console.rule()
 
-    user_message = build_user_message(question, context)
-    history.append({"role": "user", "content": user_message})
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    # Retrieved context is scaffolding for THIS answer only. Sending it with the
+    # current turn but keeping it OUT of history stops every later turn from
+    # re-shipping stale blocks (~600-1400 tokens each), which is what made the
+    # conversation slow down turn over turn.
+    recent = history[-config.HISTORY_TURNS:] if config.HISTORY_TURNS else history
+    messages = ([{"role": "system", "content": SYSTEM_PROMPT}] + recent
+                + [{"role": "user", "content": build_user_message(question, context)}])
 
     console.print()
     console.print("[bold green]Assistant[/bold green]")
@@ -337,6 +342,7 @@ def ask(
             print(token, end="", flush=True)
     print()
 
+    history.append({"role": "user", "content": question})
     history.append({"role": "assistant", "content": full_response})
     return full_response, topic_table, route, last_sql, last_intent
 
