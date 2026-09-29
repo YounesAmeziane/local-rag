@@ -23,38 +23,26 @@ def split_with_overlap(text: str, max_tokens: int, overlap: int) -> list[str]:
     """
     Splits text into chunks of at most max_tokens tokens,
     with overlap tokens of context carried forward from the previous chunk.
+
+    Tokenizes once and slices by token index (O(n)). A prior word-by-word version
+    re-encoded the growing candidate substring on every boundary check (O(n^2)+),
+    which took 10+ minutes and never finished on a single ~1000-word section.
     """
-    words = text.split()
+    tokens = _enc.encode(text)
+    if not tokens:
+        return []
+
+    step = max(max_tokens - overlap, 1)  # always advance, even if overlap >= max_tokens
     chunks = []
     start = 0
-    while start < len(words):
-        # Accumulate words until we hit the token limit
-        end = start
-        current_tokens = 0
-        while end < len(words):
-            token_count = count_tokens(" ".join(words[start:end + 1]))
-            if token_count > max_tokens:
-                break
-            current_tokens = token_count
-            end += 1
-
-        if end == start:
-            end = start + 1  # always advance at least one word
-
-        chunk_text = " ".join(words[start:end]).strip()
+    while start < len(tokens):
+        end = min(start + max_tokens, len(tokens))
+        chunk_text = _enc.decode(tokens[start:end]).strip()
         if chunk_text:
             chunks.append(chunk_text)
-
-        # Move start back by overlap tokens worth of words
-        overlap_words = 0
-        overlap_tokens = 0
-        for i in range(end - 1, start - 1, -1):
-            overlap_tokens += count_tokens(words[i])
-            if overlap_tokens >= overlap:
-                break
-            overlap_words += 1
-
-        start = end - overlap_words if overlap_words > 0 else end
+        if end == len(tokens):
+            break
+        start += step
 
     return chunks
 

@@ -13,12 +13,12 @@ import logging.handlers
 import re
 from pathlib import Path
 
-import pyodbc
 from qdrant_client.models import ScoredPoint
 
 import config
 import retriever
 import llm
+import db_pool
 
 # Module logger -> logs/sql_generator.log (mirrors planner.py). Operational notices
 # like the read-only-login warning go here, NOT to the console — printing them to
@@ -593,10 +593,7 @@ def execute_sql(sql: str) -> tuple[list[dict], list[str]]:
     Returns (rows, columns) where rows is a list of dicts.
     Caps at 100 rows and enforces a 30-second timeout.
     """
-    conn = pyodbc.connect(_build_conn_str(), timeout=30)
-    conn.timeout = 30
-
-    try:
+    with db_pool.connection(_build_conn_str) as conn:
         cursor = conn.cursor()
         cursor.execute(sql)
         columns = [desc[0] for desc in cursor.description]
@@ -604,8 +601,6 @@ def execute_sql(sql: str) -> tuple[list[dict], list[str]]:
         for row in cursor.fetchmany(100):  # hard cap at 100 rows
             rows.append(dict(zip(columns, row)))
         return rows, columns
-    finally:
-        conn.close()
 
 
 # ── Result formatting ─────────────────────────────────────────────────────────

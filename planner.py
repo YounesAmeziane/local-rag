@@ -28,6 +28,7 @@ from pathlib import Path
 import pyodbc
 
 import config
+import db_pool
 
 # ---------------------------------------------------------------------------
 # Logging setup. This module owns its own rotating file handler because
@@ -65,19 +66,12 @@ SCHEMA_DENYLIST: set[str] = set(
 )
 
 # ---------------------------------------------------------------------------
-# DB connection helper. One connection per turn, reused across all steps.
-# Matches the connection params used by sql_generator.execute_sql().
+# DB connection: pooled (db_pool.py), one checkout per turn, reused across all
+# steps. Uses sql_generator._build_conn_str() so the enumerate path shares the
+# same dedicated read-only login as the direct path (audit #3).
 # ---------------------------------------------------------------------------
 
-def _open_connection() -> pyodbc.Connection:
-    # Reuse sql_generator's read-only-login-aware connection string so the
-    # enumerate path uses the same dedicated login as the direct path (audit #3).
-    import sql_generator
-    conn = pyodbc.connect(sql_generator._build_conn_str(), timeout=30)
-    conn.timeout = 30
-    return conn
 
-# ---------------------------------------------------------------------------
 # Tool implementations.
 #
 # Every tool takes (conn, **kwargs) and returns a JSON-serializable dict.
@@ -306,33 +300,35 @@ def run_enumerate_pipeline(question: str, schema: str) -> tuple:
     import sql_generator  # deferred: avoids circular import at module load
 
     log.info(f"=== enumerate start: q={question!r} schema={schema!r} ===")
-    conn = None
     try:
-        conn = _open_connection()
-        tables = _list_user_tables(conn, schema)
-        log.info(f"enumerate: schema={schema} -> {len(tables)} tables: {tables}")
-        if not tables:
-            return (
-                f"I couldn't find any tables in schema '{schema}'.",
-                f"-- enumerate: schema={schema}, 0 tables",
-                [], [],
-            )
+        # try wraps the whole `with` so a real connection failure propagates
+        # through db_pool's own except-handling (drops the bad connection)
+        # before landing in our except below, which just shapes the message.
+        with db_pool.connection(sql_generator._build_conn_str) as conn:
+            tables = _list_user_tables(conn, schema)
+            log.info(f"enumerate: schema={schema} -> {len(tables)} tables: {tables}")
+            if not tables:
+                return (
+                    f"I couldn't find any tables in schema '{schema}'.",
+                    f"-- enumerate: schema={schema}, 0 tables",
+                    [], [],
+                )
 
-        core_sql = _build_union_count_sql(schema, tables)
-        sql_used = f"-- enumerate: schema={schema}, {len(tables)} tables\n{core_sql}"
+            core_sql = _build_union_count_sql(schema, tables)
+            sql_used = f"-- enumerate: schema={schema}, {len(tables)} tables\n{core_sql}"
 
-        # Defense-in-depth: the same SELECT-only guard the single-step path uses.
-        valid, reason = sql_generator.validate_sql(core_sql)
-        if not valid:
-            log.error(f"enumerate: built SQL failed validation: {reason}")
-            return (
-                f"I built a query to enumerate schema '{schema}' but it failed "
-                f"safety validation ({reason}).",
-                sql_used, [], [],
-            )
+            # Defense-in-depth: the same SELECT-only guard the single-step path uses.
+            valid, reason = sql_generator.validate_sql(core_sql)
+            if not valid:
+                log.error(f"enumerate: built SQL failed validation: {reason}")
+                return (
+                    f"I built a query to enumerate schema '{schema}' but it failed "
+                    f"safety validation ({reason}).",
+                    sql_used, [], [],
+                )
 
-        rows, columns = _execute(conn, core_sql)
-        log.info(f"enumerate: {len(rows)} per-table rows")
+            rows, columns = _execute(conn, core_sql)
+            log.info(f"enumerate: {len(rows)} per-table rows")
     except Exception as e:
         log.error(f"enumerate: exception {e!r}")
         return (
@@ -340,12 +336,6 @@ def run_enumerate_pipeline(question: str, schema: str) -> tuple:
             f"-- enumerate: schema={schema} (failed)",
             [], [],
         )
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
     # Final NL shaping + trivial arithmetic over the small clean result set.
     results_context = sql_generator.format_results_for_llm(rows, columns, core_sql)

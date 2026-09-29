@@ -5,12 +5,25 @@
 #   /quit     — exit
 
 import os
+import sys
 from rich.console import Console
 import retriever
 import router
 import sql_generator
 import config
 import llm
+from session import Session
+
+# Windows consoles default to cp1252. When stdout isn't a real attached
+# terminal (piped, redirected, or run as a headless/background service --
+# e.g. webui.py as a Windows Service), Rich falls back to a legacy renderer
+# that hits cp1252 and can't encode its box-drawing characters, crashing the
+# whole request (matches the same fix already applied to ingest.py/ingest_docs.py).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 console = Console()
 
@@ -411,12 +424,8 @@ def main():
     console.print("Ask questions about tables, columns, schemas, or data types.\n")
     print_help()
 
-    history: list[dict] = []
-    last_question: str | None = None
-    topic_table: str | None = None
-    last_sql: str | None = None
-    last_intent: str | None = None
-    last_route: str | None = None
+    session = Session()
+    last_question: str | None = None  # CLI-only (for /sources); not part of Session
 
     while True:
         try:
@@ -433,20 +442,16 @@ def main():
             break
 
         if user_input.lower() == "/reset":
-            history.clear()
+            session.reset()
             last_question = None
-            topic_table = None
-            last_sql = None
-            last_intent = None
-            last_route = None
             console.print("[dim]Conversation history cleared.[/dim]\n")
             continue
 
         if user_input.lower() == "/sources":
             if last_question:
-                ask(last_question, [], show_sources=True, topic_table=topic_table,
-                    last_sql=last_sql, last_intent=last_intent, last_route=last_route,
-                    clearance=config.APP_CLEARANCE)
+                ask(last_question, [], show_sources=True, topic_table=session.topic_table,
+                    last_sql=session.last_sql, last_intent=session.last_intent,
+                    last_route=session.last_route, clearance=config.APP_CLEARANCE)
             else:
                 console.print("[dim]No previous question to show sources for.[/dim]")
             continue
@@ -469,14 +474,14 @@ def main():
             continue
 
         last_question = user_input
-        _, topic_table, last_route, last_sql, last_intent = ask(
-            user_input, history, topic_table=topic_table, last_sql=last_sql,
-            last_intent=last_intent, last_route=last_route, clearance=config.APP_CLEARANCE,
+        _, session.topic_table, session.last_route, session.last_sql, session.last_intent = ask(
+            user_input, session.history, topic_table=session.topic_table, last_sql=session.last_sql,
+            last_intent=session.last_intent, last_route=session.last_route, clearance=config.APP_CLEARANCE,
         )
         console.print(
-            f"[dim](turns: {len(history) // 2}  |  "
-            f"route: {last_route}  |  "
-            f"topic: {topic_table or 'none'}  |  "
+            f"[dim](turns: {len(session.history) // 2}  |  "
+            f"route: {session.last_route}  |  "
+            f"topic: {session.topic_table or 'none'}  |  "
             f"/sources to inspect  |  /reset to clear)[/dim]\n"
         )
 

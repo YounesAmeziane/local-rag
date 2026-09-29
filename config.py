@@ -11,6 +11,10 @@ DB_DRIVER   = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
 DB_READONLY_USER     = os.getenv("DB_READONLY_USER", "").strip()
 DB_READONLY_PASSWORD = os.getenv("DB_READONLY_PASSWORD", "")
 
+# Max concurrent pyodbc connections held by db_pool.py. Matters once multiple
+# users can trigger overlapping SQL calls (server), not on a single-user laptop.
+DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+
 PLANNER_SCHEMA_DENYLIST = [
     s.strip()
     for s in os.getenv("PLANNER_SCHEMA_DENYLIST", "sys,INFORMATION_SCHEMA,guest").split(",")
@@ -115,5 +119,14 @@ if QDRANT_HOST == "localhost" or "//localhost" in OLLAMA_HOST:
         "config WARNING: a host is set to 'localhost', which incurs an intermittent "
         "multi-second IPv6 (::1) stall per call on Windows -- use 127.0.0.1 for "
         "QDRANT_HOST and OLLAMA_HOST (audit #1).",
+        file=sys.stderr,
+    )
+
+if bool(DB_READONLY_USER) != bool(DB_READONLY_PASSWORD):
+    import sys
+    print(
+        "config WARNING: only one of DB_READONLY_USER/DB_READONLY_PASSWORD is set -- "
+        "sql_generator._build_conn_str() requires BOTH, so this silently falls back to "
+        "Trusted_Connection (the service's Windows identity), not the read-only login.",
         file=sys.stderr,
     )

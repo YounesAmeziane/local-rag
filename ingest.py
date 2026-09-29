@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.progress import track
 import config
 import llm
+import sql_generator
 
 # Windows consoles default to cp1252, which can't encode the ✓/✗ status glyphs this
 # script prints -- forcing UTF-8 stops a run from dying on the success message.
@@ -31,17 +32,10 @@ console = Console()
 
 def load_data() -> pd.DataFrame:
     console.print("[bold cyan]Connecting to SQL Server...[/bold cyan]")
-    conn_str = (
-        f"DRIVER={{{config.DB_DRIVER}}};"
-        f"SERVER={config.DB_SERVER};"
-        f"DATABASE={config.DB_DATABASE};"
-        "Trusted_Connection=yes;"
-        # MetadataRepository is an AlwaysOn availability-group DB currently served
-        # from a read-only secondary, which REFUSES connections without read-only
-        # intent (error 978). Ingest is read-only anyway.
-        "ApplicationIntent=ReadOnly;"
-    )
-    conn = pyodbc.connect(conn_str)
+    # Same connection string sql_generator/planner use (audit #3) -- picks up
+    # DB_READONLY_USER/PASSWORD automatically when set, instead of always
+    # running ingest under the service's Windows identity.
+    conn = pyodbc.connect(sql_generator._build_conn_str(), timeout=30)
     df = pd.read_sql(config.INGEST_QUERY, conn)
     conn.close()
     console.print(f"[green]✓ Loaded {len(df):,} rows from DataDictionary[/green]")

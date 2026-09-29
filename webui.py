@@ -13,25 +13,11 @@ from pathlib import Path
 import chat
 import config
 import llm
+from session import Session
 
 HOST = "127.0.0.1"
 PORT = int(__import__("os").getenv("WEBUI_PORT", "8080"))
 _STATIC = Path(__file__).parent / "static"
-
-
-class Session:
-    """Per-conversation state — the same values chat.main() kept in locals."""
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.history: list[dict] = []
-        self.topic_table = None
-        self.last_sql = None
-        self.last_intent = None
-        self.last_route = None
-
 
 _session = Session()
 _lock = threading.Lock()   # one generation at a time; the model can't batch anyway

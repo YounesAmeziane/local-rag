@@ -9,6 +9,7 @@
 #   python ingest_docs.py --force    # re-ingest everything
 #   python ingest_docs.py --delete path/to/file.pdf  # remove a specific file
 
+import sys
 import argparse
 import uuid
 from pathlib import Path
@@ -22,6 +23,15 @@ import config
 import doc_registry as registry
 import llm
 from chunker import chunk_file
+
+# Windows consoles default to cp1252, which can't encode the ✓/✗/↻ status glyphs
+# this script prints -- forcing UTF-8 stops a run from dying after a successful
+# ingest, mid-print, before the registry gets saved (matches the ingest.py fix).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 console = Console()
 _qdrant  = QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT)
