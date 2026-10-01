@@ -64,9 +64,12 @@ if ($existing) {
     Start-Sleep -Seconds 2
 }
 
-# --http-port / --grpc-port are real qdrant.exe CLI flags; storage paths come
-# from the env vars set below, not the command line.
-$binPath = "`"$QdrantExe`" --http-port $HttpPort --grpc-port $GrpcPort"
+# qdrant.exe has NO --http-port/--grpc-port flags (verified against its real
+# --help output -- an earlier version of this script invented them, which made
+# the service fail to start with a useless generic SCM error, since qdrant.exe
+# exits immediately on an unrecognized argument). Ports, like storage paths,
+# are config-only -- set below via the QDRANT__SERVICE__* env vars.
+$binPath = "`"$QdrantExe`""
 sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= "Qdrant Vector DB" | Out-Null
 if ($LASTEXITCODE -ne 0) {
     # sc.exe failing doesn't raise a PowerShell exception -- check the exit code
@@ -76,11 +79,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 sc.exe description $ServiceName "Qdrant vector database for local-rag (data_dictionary + documents collections)" | Out-Null
 
-# Per-service environment variables, via the registry (no NSSM needed).
+# Per-service environment variables, via the registry (no NSSM needed). Verified
+# against a real qdrant.exe: QDRANT__SERVICE__HTTP_PORT/GRPC_PORT and
+# QDRANT__STORAGE__STORAGE_PATH/SNAPSHOTS_PATH all take effect as expected, with
+# no cross-talk against another Qdrant instance running on its own ports/paths.
 $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 Set-ItemProperty -Path $regPath -Name "Environment" -Type MultiString -Value @(
     "QDRANT__STORAGE__STORAGE_PATH=$storagePath",
-    "QDRANT__STORAGE__SNAPSHOTS_PATH=$snapshotsPath"
+    "QDRANT__STORAGE__SNAPSHOTS_PATH=$snapshotsPath",
+    "QDRANT__SERVICE__HTTP_PORT=$HttpPort",
+    "QDRANT__SERVICE__GRPC_PORT=$GrpcPort"
 )
 
 Write-Host "Starting service '$ServiceName'..."
