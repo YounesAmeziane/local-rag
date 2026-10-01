@@ -20,6 +20,9 @@ vLLM/LM Studio, why RBAC isn't built yet, etc).
   `D:\local-rag-data\`.
 - This repo, cloned or copied onto the server.
 - Python 3.10+, `pip install -r requirements.txt`.
+- **NSSM** (https://nssm.cc/download) — needed to run `qdrant.exe` as a
+  Windows Service (see step 2; a plain `sc.exe create` does not work against
+  it, confirmed on a real deployment).
 
 ## 1. Decide on a model quant (VRAM-dependent — self-serve)
 
@@ -39,12 +42,21 @@ project and drop down only if it doesn't fit.
 
 ## 2. Qdrant
 
+Download **NSSM** first: https://nssm.cc/download (the win64 build, unless
+this is a 32-bit box). `qdrant.exe` is a plain console app — it doesn't
+implement the Windows Service Control Protocol, so registering it directly
+via `sc.exe create` does not work (confirmed on a real run: it fails with
+Event ID 7000/7009, "did not respond to the start or control request in a
+timely fashion," no matter what arguments/env vars are set). NSSM wraps a
+plain exe so it behaves as a real service.
+
 Run `install_qdrant_service.ps1` (as Administrator):
 ```powershell
-.\install_qdrant_service.ps1 -QdrantExe "D:\qdrant\qdrant.exe" -DataDir "D:\local-rag-data\qdrant"
+.\install_qdrant_service.ps1 -QdrantExe "C:\qdrant\qdrant.exe" -NssmExe "C:\nssm\nssm.exe" -DataDir "C:\local-rag-data\qdrant"
 ```
-This registers Qdrant as an auto-starting Windows Service, with its storage
-pointed at the given (non-synced) directory. It starts empty — after it's up,
+This registers Qdrant as an auto-starting Windows Service via NSSM, with its
+storage pointed at the given (non-synced) directory and its stdout/stderr
+logged to `qdrant-service.log` inside that same directory. It starts empty — after it's up,
 run `python ingest.py` and `python ingest_docs.py` from this repo (against
 `QDRANT_HOST=127.0.0.1`) to populate the `data_dictionary` and `documents`
 collections.
